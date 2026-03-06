@@ -10,7 +10,7 @@
   "macro_idx":           [],
   "macro_feature_dim":   0,
 
-  "individual_feature_dim": 22,
+  "individual_feature_dim": 33,
 
   "num_layers":    1,
   "hidden_dim":    [64],
@@ -28,17 +28,17 @@
 
   "_comment_features": {
     "0~4":   "Price Momentum  (r1w, r4w, r12w, r26w, r52w)",
-    "5~9":   "Technical       (rsi_14, bb_pct, vol_ratio, atr_pct, obv_change)",
-    "10~14": "On-chain        (active_addr, tx_count, nvt, exchange_net_flow, mvrv)",
-    "15~18": "Macro/Sentiment (fear_greed, spx_ret, dxy_ret, vix)",
-    "19~21": "ETF+Polymarket  (etf_net_flow_norm, polymarket_btc, etf_net_flow_raw)"
+    "5~10":  "Technical       (rsi_14, bb_pct, vol_ratio, atr_pct, obv_change, vol_usd)",
+    "11~15": "On-chain        (active_addr, tx_count, nvt, exchange_net_flow, mvrv)",
+    "16~26": "Macro/Sentiment (fear_greed, spx_ret, dxy_ret, vix, gold_ret, silver_ret, dji_ret, spx_vol_chg, gold_vol_chg, silver_vol_chg, dji_vol_chg)",
+    "27~32": "ETF+Polymarket  (btc_etf_inflow_norm, polymarket_btc, btc_etf_inflow_raw, eth_etf_inflow_norm, eth_etf_inflow_raw, btc_etf_vol)"
   },
 
   "_comment_subset_examples": {
     "price_only":        "range(0, 5)",
-    "price_technical":   "range(0, 10)",
-    "price_onchain":     "range(0, 15)",
-    "all_no_etf_poly":   "range(0, 19)",
-    "all":               "range(0, 22)"
+    "price_technical":   "range(0, 11)",
+    "price_onchain":     "range(0, 16)",
+    "all_no_etf_poly":   "range(0, 27)",
+    "all":               "range(0, 33)"
   }
 }

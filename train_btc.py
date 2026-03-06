@@ -17,10 +17,10 @@ Ensemble 策略）與論文保持完全一致。
       --max_num_process 0
 
 特徵子集說明（在 get_tuned_network() 中修改 subset）：
-  range(0, 10)  : 僅價格動能 + 技術指標
-  range(0, 15)  : 加入鏈上指標
-  range(0, 22)  : 全部 22 個特徵
-  list(range(0,5)) + list(range(15,22)) : 動能 + 總體情緒 + ETF
+  range(0, 11)  : 僅價格動能 + 技術指標
+  range(0, 16)  : 加入鏈上指標
+  range(0, 33)  : 全部 33 個特徵
+  list(range(0,5)) + list(range(16,33)) : 動能 + 總體情緒 + ETF
 """
 
 import argparse
@@ -184,21 +184,21 @@ def get_tuned_network() -> list:
 
     (A) 僅價格動能 + 技術指標（不需外部 API，最快）
     (B) 加入鏈上指標
-    (C) 全部 22 個特徵
+    (C) 全部 33 個特徵
     (D) 動能 + 總體情緒 + ETF（簡約模型）
     """
     temp_results = [
-        # (A) Price Momentum + Technical  [0~9]
-        [range(0, 10),  1, [64], 0.95, 6, 0.0, 0.001, 0.001, "Factor_sharpe"],
+        # (A) Price Momentum + Technical  [0~10]
+        [range(0, 11),  1, [64], 0.95, 6, 0.0, 0.001, 0.001, "Factor_sharpe"],
 
-        # (B) + On-chain  [0~14]
-        [range(0, 15),  1, [64], 0.95, 6, 0.0, 0.001, 0.001, "Factor_sharpe"],
+        # (B) + On-chain  [0~15]
+        [range(0, 16),  1, [64], 0.95, 6, 0.0, 0.001, 0.001, "Factor_sharpe"],
 
-        # (C) All features  [0~21]
-        [range(0, 22),  1, [64], 0.95, 6, 0.0, 0.001, 0.001, "Factor_sharpe"],
+        # (C) All features  [0~32]
+        [range(0, 33),  1, [64], 0.95, 6, 0.0, 0.001, 0.001, "Factor_sharpe"],
 
         # (D) Momentum + Macro + ETF（parsimonious）
-        [list(range(0, 5)) + list(range(15, 22)),
+        [list(range(0, 5)) + list(range(16, 33)),
          1, [64], 0.95, 6, 0.0, 0.001, 0.001, "Factor_sharpe"],
     ]
 

@@ -7,7 +7,7 @@ BTC 多資產 Panel 資料載入層。
 deep_learning/src/ 目錄，不依賴任何 TF1 模組。
 
 主要差異：
-  - FirmChar → CryptoChar（5 大特徵類別，22 個特徵）
+  - FirmChar → CryptoChar（5 大特徵類別，33 個特徵）
   - wficn    → 加密資產代碼（BTC, ETH, SOL, ...）
   - 缺失值標記為 UNK = -99.99（與原版一致）
   - 型別注解相容 Python 3.8+
@@ -54,10 +54,13 @@ class CryptoChar:
     加密資產特徵的分類定義（對應原版 FirmChar）。
 
     Category A - Price Momentum  : r1w, r4w, r12w, r26w, r52w
-    Category B - Technical       : rsi_14, bb_pct, vol_ratio, atr_pct, obv_change
+    Category B - Technical       : rsi_14, bb_pct, vol_ratio, atr_pct, obv_change, vol_usd
     Category C - On-chain        : active_addr, tx_count, nvt, exchange_net_flow, mvrv
-    Category D - Macro/Sentiment : fear_greed, spx_ret, dxy_ret, vix
-    Category E - ETF + Polymarket: etf_net_flow_norm, polymarket_btc, etf_net_flow_raw
+    Category D - Macro/Sentiment : fear_greed, spx_ret, dxy_ret, vix,
+                                   gold_ret, silver_ret, dji_ret,
+                                   spx_vol_chg, gold_vol_chg, silver_vol_chg, dji_vol_chg
+    Category E - ETF + Polymarket: btc_etf_inflow_norm, polymarket_btc, btc_etf_inflow_raw,
+                                   eth_etf_inflow_norm, eth_etf_inflow_raw, btc_etf_vol
     """
 
     def __init__(self) -> None:
@@ -70,10 +73,13 @@ class CryptoChar:
         ]
         self._category2variables = {
             "Price Momentum":   ["r1w", "r4w", "r12w", "r26w", "r52w"],
-            "Technical":        ["rsi_14", "bb_pct", "vol_ratio", "atr_pct", "obv_change"],
+            "Technical":        ["rsi_14", "bb_pct", "vol_ratio", "atr_pct", "obv_change", "vol_usd"],
             "On-chain":         ["active_addr", "tx_count", "nvt", "exchange_net_flow", "mvrv"],
-            "Macro/Sentiment":  ["fear_greed", "spx_ret", "dxy_ret", "vix"],
-            "ETF & Polymarket": ["etf_net_flow_norm", "polymarket_btc", "etf_net_flow_raw"],
+            "Macro/Sentiment":  ["fear_greed", "spx_ret", "dxy_ret", "vix",
+                                 "gold_ret", "silver_ret", "dji_ret",
+                                 "spx_vol_chg", "gold_vol_chg", "silver_vol_chg", "dji_vol_chg"],
+            "ETF & Polymarket": ["btc_etf_inflow_norm", "polymarket_btc", "btc_etf_inflow_raw",
+                                 "eth_etf_inflow_norm", "eth_etf_inflow_raw", "btc_etf_vol"],
         }
         self._variable2category = {
             var: cat

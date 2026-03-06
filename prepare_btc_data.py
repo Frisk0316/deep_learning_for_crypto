@@ -4,37 +4,42 @@ prepare_btc_data.py
 BTC 多資產 Panel 資料整合主腳本。
 
 執行流程：
-  1. 下載 14 個主流加密資產的週 OHLCV → 計算價格動能 + 技術指標 (10 個特徵)
+  1. 下載 14 個主流加密資產的週 OHLCV → 計算價格動能 + 技術指標 (11 個特徵)
   2. 從 CoinMetrics Community API 取得鏈上指標 (5 個特徵)
-  3. 從 alternative.me + yfinance 取得情緒/總體特徵 (4 個特徵)
-  4. 從 Coinglass/SoSoValue 取得 BTC ETF 淨流入 (2 個特徵)
+  3. 從 alternative.me + yfinance 取得情緒/總體特徵 (11 個特徵)
+  4. 從 Farside CSV / Yahoo Finance 取得 BTC/ETH ETF 流量+成交量 (5 個特徵)
   5. 從 Polymarket 取得 BTC 看漲情緒指數 (1 個特徵)
   6. 橫截面排名標準化 → 儲存為 .npz
 
 輸出資料集格式（與原始 mutual fund 程式相容）：
   data     : np.ndarray, shape (T, N, M+1)
              data[:, :, 0]  = 下週報酬（target），缺失為 -99.99
-             data[:, :, 1:] = 22 個特徵（詳見 VARIABLE_NAMES）
+             data[:, :, 1:] = 33 個特徵（詳見 VARIABLE_NAMES）
   date     : np.ndarray, shape (T,)  週結束日（字串）
   wficn    : np.ndarray, shape (N,)  資產代碼（等同原始的基金 ID）
-  variable : np.ndarray, shape (22,) 特徵名稱
+  variable : np.ndarray, shape (33,) 特徵名稱
 
-特徵索引對應（22 個特徵）：
-  Category A - Price Momentum  [0~4]  : r1w, r4w, r12w, r26w, r52w
-  Category B - Technical       [5~9]  : rsi_14, bb_pct, vol_ratio, atr_pct, obv_change
-  Category C - On-chain        [10~14]: active_addr, tx_count, nvt, exchange_net_flow, mvrv
-  Category D - Market/Macro    [15~18]: fear_greed, spx_ret, dxy_ret, vix
-  Category E - ETF + Polymarket[19~21]: etf_net_flow_norm, polymarket_btc (+ etf_net_flow raw)
+特徵索引對應（33 個特徵）：
+  Category A - Price Momentum  [0~4]   : r1w, r4w, r12w, r26w, r52w
+  Category B - Technical       [5~10]  : rsi_14, bb_pct, vol_ratio, atr_pct, obv_change, vol_usd
+  Category C - On-chain        [11~15] : active_addr, tx_count, nvt, exchange_net_flow, mvrv
+  Category D - Market/Macro    [16~26] : fear_greed, spx_ret, dxy_ret, vix,
+                                         gold_ret, silver_ret, dji_ret,
+                                         spx_vol_chg, gold_vol_chg, silver_vol_chg, dji_vol_chg
+  Category E - ETF + Polymarket[27~32] : btc_etf_inflow_norm, polymarket_btc, btc_etf_inflow_raw,
+                                         eth_etf_inflow_norm, eth_etf_inflow_raw, btc_etf_vol
 
-訓練腳本中 subset = range(0, 22) 代表全部特徵；
-可依研究設計選取子集，例如 range(0, 10) 僅使用價格/技術特徵。
+訓練腳本中 subset = range(0, 33) 代表全部特徵；
+可依研究設計選取子集，例如 range(0, 11) 僅使用價格/技術特徵。
 
 使用方式：
   python prepare_btc_data.py [--start 2020-01-01] [--end 2025-12-31]
                              [--out datasets/btc_panel.npz]
-                             [--etf_csv datasets/btc_etf_flows.csv]
+                             [--btc_etf_csv btc_spot_etf_from_farside.csv]
+                             [--eth_etf_csv eth_spot_etf_from_farside.csv]
                              [--skip_onchain] [--skip_polymarket]
 """
+from __future__ import annotations
 
 import argparse
 import os
@@ -55,21 +60,24 @@ from data_sources.fetch_polymarket import build_polymarket_panel
 
 UNK = -99.99
 
-# 特徵名稱（共 22 個，index 對應 data[:, :, 1:23]）
+# 特徵名稱（共 33 個，index 對應 data[:, :, 1:34]）
 VARIABLE_NAMES = [
-    # Category A: Price Momentum
+    # Category A: Price Momentum (per-asset, cross-sectional rank)
     "r1w", "r4w", "r12w", "r26w", "r52w",
-    # Category B: Technical Indicators
-    "rsi_14", "bb_pct", "vol_ratio", "atr_pct", "obv_change",
-    # Category C: On-chain Metrics
+    # Category B: Technical Indicators (per-asset, cross-sectional rank)
+    "rsi_14", "bb_pct", "vol_ratio", "atr_pct", "obv_change", "vol_usd",
+    # Category C: On-chain Metrics (per-asset, cross-sectional rank)
     "active_addr", "tx_count", "nvt", "exchange_net_flow", "mvrv",
-    # Category D: Macro / Sentiment（對所有資產相同）
+    # Category D: Macro / Sentiment（對所有資產相同，rolling z-score）
     "fear_greed", "spx_ret", "dxy_ret", "vix",
-    # Category E: BTC ETF Flows + Polymarket（對所有資產相同）
-    "etf_net_flow_norm", "polymarket_btc", "etf_net_flow_raw",
+    "gold_ret", "silver_ret", "dji_ret",
+    "spx_vol_chg", "gold_vol_chg", "silver_vol_chg", "dji_vol_chg",
+    # Category E: ETF + Polymarket（對所有資產相同，rolling z-score）
+    "btc_etf_inflow_norm", "polymarket_btc", "btc_etf_inflow_raw",
+    "eth_etf_inflow_norm", "eth_etf_inflow_raw", "btc_etf_vol",
 ]
 
-N_FEATURES = len(VARIABLE_NAMES)  # 22
+N_FEATURES = len(VARIABLE_NAMES)  # 33
 
 
 def _cross_sectional_rank_normalize(
@@ -153,6 +161,8 @@ def build_dataset(
     end:   str | None = None,
     skip_onchain:    bool = False,
     skip_polymarket: bool = False,
+    btc_etf_csv:     str | None = None,
+    eth_etf_csv:     str | None = None,
     etf_csv:         str | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
@@ -163,7 +173,7 @@ def build_dataset(
                  data[:, :, 1:] = features
     """
     print("=" * 60)
-    print("Step 1: 下載 OHLCV 資料 & 計算價格/技術特徵 (features 0~9)")
+    print("Step 1: 下載 OHLCV 資料 & 計算價格/技術特徵 (features 0~10)")
     print("=" * 60)
     dates, assets, price_panel = build_price_feature_panel(start=start, end=end)
     T, N = len(dates), len(assets)
@@ -173,49 +183,57 @@ def build_dataset(
     print(f"資產列表：{assets}")
 
     # 最終 data 陣列：[T, N, 1+N_FEATURES]
-    # col 0 = return, col 1~22 = features
+    # col 0 = return, col 1~33 = features
     data = np.full((T, N, 1 + N_FEATURES), UNK, dtype=np.float32)
 
-    # price_panel shape: (T, N, 11) = [target_return, 10 features]
-    data[:, :, 0]    = price_panel[:, :, 0]   # target
-    data[:, :, 1:11] = price_panel[:, :, 1:]  # features 0~9
+    # price_panel shape: (T, N, 12) = [target_return, 11 features]
+    data[:, :, 0]    = price_panel[:, :, 0]    # target
+    data[:, :, 1:12] = price_panel[:, :, 1:]   # features 0~10
 
     # ── Step 2: 鏈上指標 ─────────────────────────────────────────────────────
     print("\n" + "=" * 60)
-    print("Step 2: 取得鏈上指標 (features 10~14)")
+    print("Step 2: 取得鏈上指標 (features 11~15)")
     print("=" * 60)
     if not skip_onchain:
         onchain_panel = build_onchain_panel(assets=assets, dates=dates, start=start, end=end)
-        data[:, :, 11:16] = onchain_panel  # features 10~14
+        data[:, :, 12:17] = onchain_panel  # features 11~15
     else:
         print("  [SKIP] 跳過鏈上資料")
 
     # ── Step 3: 情緒/總體特徵 ────────────────────────────────────────────────
     print("\n" + "=" * 60)
-    print("Step 3: 取得情緒/總體特徵 (features 15~18)")
+    print("Step 3: 取得情緒/總體特徵 (features 16~26)")
     print("=" * 60)
-    sentiment_panel = build_sentiment_panel(dates=dates, start=start)  # (T, 4)
+    sentiment_panel = build_sentiment_panel(dates=dates, start=start)  # (T, 11)
     # 廣播至所有資產（這些特徵對所有資產相同）
     for n in range(N):
-        data[:, n, 16:20] = sentiment_panel  # features 15~18
+        data[:, n, 17:28] = sentiment_panel  # features 16~26
 
-    # ── Step 4: BTC ETF 淨流入 ───────────────────────────────────────────────
+    # ── Step 4: ETF 流量 + 成交量 ─────────────────────────────────────────────
     print("\n" + "=" * 60)
-    print("Step 4: 取得 BTC ETF 流量 (features 19, 21)")
+    print("Step 4: 取得 BTC/ETH ETF 流量 + BTC ETF 成交量 (features 27~29, 30~31, 32)")
     print("=" * 60)
-    etf_panel = build_etf_panel(dates=dates, csv_backup=etf_csv)  # (T, 2)
+    etf_panel = build_etf_panel(
+        dates=dates,
+        btc_farside_csv=btc_etf_csv,
+        eth_farside_csv=eth_etf_csv,
+        csv_backup=etf_csv,
+    )  # (T, 5)
     for n in range(N):
-        data[:, n, 20] = etf_panel[:, 1]  # etf_net_flow_norm → feature 19
-        data[:, n, 22] = etf_panel[:, 0]  # etf_net_flow_raw  → feature 21
+        data[:, n, 28] = etf_panel[:, 0]  # btc_etf_inflow_norm → feature 27
+        data[:, n, 30] = etf_panel[:, 1]  # btc_etf_inflow_raw  → feature 29
+        data[:, n, 31] = etf_panel[:, 2]  # eth_etf_inflow_norm → feature 30
+        data[:, n, 32] = etf_panel[:, 3]  # eth_etf_inflow_raw  → feature 31
+        data[:, n, 33] = etf_panel[:, 4]  # btc_etf_vol         → feature 32
 
     # ── Step 5: Polymarket ──────────────────────────────────────────────────
     print("\n" + "=" * 60)
-    print("Step 5: 取得 Polymarket BTC 看漲指數 (feature 20)")
+    print("Step 5: 取得 Polymarket BTC 看漲指數 (feature 28)")
     print("=" * 60)
     if not skip_polymarket:
         poly_panel = build_polymarket_panel(dates=dates, start=start)  # (T, 1)
         for n in range(N):
-            data[:, n, 21] = poly_panel[:, 0]  # polymarket_btc → feature 20
+            data[:, n, 29] = poly_panel[:, 0]  # polymarket_btc → feature 28
     else:
         print("  [SKIP] 跳過 Polymarket 資料")
 
@@ -224,18 +242,20 @@ def build_dataset(
     print("Step 6: 標準化")
     print("=" * 60)
 
-    # 個別資產特徵（Category A~C, features 0~14）：橫截面排名標準化
-    print("  橫截面排名標準化 (features 0~14)...")
-    feat_cross = data[:, :, 1:16].copy()  # (T, N, 15)
-    feat_cross = _cross_sectional_rank_normalize(feat_cross, slice(0, 15))
-    data[:, :, 1:16] = feat_cross
+    # 個別資產特徵（Category A~C, features 0~15）：橫截面排名標準化
+    n_cross = 16  # features 0-15
+    print(f"  橫截面排名標準化 (features 0~15, {n_cross} 個特徵)...")
+    feat_cross = data[:, :, 1:1+n_cross].copy()  # (T, N, 16)
+    feat_cross = _cross_sectional_rank_normalize(feat_cross, slice(0, n_cross))
+    data[:, :, 1:1+n_cross] = feat_cross
 
-    # 總體特徵（Category D~E, features 15~21）：時間序列滾動 z-score
-    print("  時間序列 z-score 標準化 (features 15~21)...")
-    feat_macro = data[:, 0, 16:23].copy()  # (T, 7)，取第 0 個資產代表（所有資產相同）
+    # 總體特徵（Category D~E, features 16~32）：時間序列滾動 z-score
+    n_macro = N_FEATURES - n_cross  # 17 features
+    print(f"  時間序列 z-score 標準化 (features 16~32, {n_macro} 個特徵)...")
+    feat_macro = data[:, 0, 1+n_cross:1+N_FEATURES].copy()  # (T, 17)
     feat_macro = _time_series_normalize(feat_macro)
     for n in range(N):
-        data[:, n, 16:23] = feat_macro
+        data[:, n, 1+n_cross:1+N_FEATURES] = feat_macro
 
     # clip 所有非缺失值至 [-3, 3]
     print("  Clip 極端值至 [-3, 3]...")
@@ -260,8 +280,12 @@ def main():
                         help="資料結束日（預設今日）")
     parser.add_argument("--out",            default="datasets/btc_panel.npz",
                         help="輸出 NPZ 路徑")
+    parser.add_argument("--btc_etf_csv",    default=None,
+                        help="BTC ETF Farside CSV 路徑")
+    parser.add_argument("--eth_etf_csv",    default=None,
+                        help="ETH ETF Farside CSV 路徑")
     parser.add_argument("--etf_csv",        default=None,
-                        help="ETF 流量 CSV 備援路徑（可選）")
+                        help="ETF 流量 CSV 備援路徑（舊版相容）")
     parser.add_argument("--skip_onchain",   action="store_true",
                         help="跳過 CoinMetrics 鏈上資料（加快速度）")
     parser.add_argument("--skip_polymarket",action="store_true",
@@ -276,6 +300,8 @@ def main():
         end             = args.end,
         skip_onchain    = args.skip_onchain,
         skip_polymarket = args.skip_polymarket,
+        btc_etf_csv     = args.btc_etf_csv,
+        eth_etf_csv     = args.eth_etf_csv,
         etf_csv         = args.etf_csv,
     )
 

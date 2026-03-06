@@ -1,5 +1,28 @@
+# Python temporary files
 __pycache__/
-datasets/
-*.npz
-*.csv
+*.pyc
+*.pyo
+*.pyd
+
+# Environment variables
 .env
+
+# Datasets and generated data files
+# (from prepare_btc_data.py)
+datasets/
+sampling_folds/
+*.npz
+*.npy
+*.csv
+
+# Trained model checkpoints
+# (from train_btc.py)
+checkpoints/
+*.log
+
+# Generated plots
+visualizations/
+
+# IDE and tool-specific settings
+.vscode/
+.claude/

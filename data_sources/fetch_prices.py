@@ -7,6 +7,7 @@ fetch_prices.py
 資料來源：Yahoo Finance (免費，無需 API key)
 涵蓋資產：BTC, ETH, SOL, BNB, XRP, AVAX, DOGE, ADA, MATIC, LINK, DOT, LTC, UNI, ATOM
 """
+from __future__ import annotations
 
 import numpy as np
 import pandas as pd
@@ -71,8 +72,8 @@ def fetch_ohlcv(start="2020-01-01", end=None, interval="1wk"):
 
 def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     """
-    從 OHLCV DataFrame 計算 10 個特徵：
-      Price Momentum (5) + Technical Indicators (5)
+    從 OHLCV DataFrame 計算 11 個特徵：
+      Price Momentum (5) + Technical Indicators (6)
 
     Parameters
     ----------
@@ -128,6 +129,10 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     obv = (np.sign(close.diff()) * volume).cumsum()
     feat["obv_change"] = obv.pct_change(4)
 
+    # 週 USD 交易量（log 尺度）
+    usd_vol = close * volume
+    feat["vol_usd"] = np.log1p(usd_vol)
+
     return feat
 
 
@@ -135,16 +140,16 @@ def build_price_feature_panel(
     start="2020-01-01", end=None
 ) -> tuple[pd.DatetimeIndex, list[str], np.ndarray]:
     """
-    建立 (T, N, 11) 的 panel：第 0 欄為「下週報酬（target）」，1~10 欄為特徵。
+    建立 (T, N, 12) 的 panel：第 0 欄為「下週報酬（target）」，1~11 欄為特徵。
 
     Returns
     -------
     dates    : pd.DatetimeIndex (長度 T)
     assets   : list[str]       (長度 N)
-    panel    : np.ndarray      shape (T, N, 11)
-               panel[:, :, 0]   = next-week return (target, -99.99 if missing)
-               panel[:, :, 1:6] = momentum features
-               panel[:, :, 6:]  = technical features
+    panel    : np.ndarray      shape (T, N, 12)
+               panel[:, :, 0]    = next-week return (target, -99.99 if missing)
+               panel[:, :, 1:6]  = momentum features
+               panel[:, :, 6:12] = technical features (incl. vol_usd)
     """
     raw = fetch_ohlcv(start=start, end=end)
     if not raw:
@@ -157,7 +162,7 @@ def build_price_feature_panel(
     T, N   = len(dates), len(assets)
 
     # panel[t, n, 0] = 下週報酬；panel[t, n, 1:] = 特徵
-    panel = np.full((T, N, 11), UNK, dtype=np.float32)
+    panel = np.full((T, N, 12), UNK, dtype=np.float32)
 
     for n, name in enumerate(assets):
         df = raw[name].reindex(dates)

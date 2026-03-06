@@ -1,246 +1,335 @@
 """
 fetch_etf_flows.py
 ------------------
-取得比特幣現貨 ETF 每日淨流入/流出資料。
+取得比特幣/以太坊現貨 ETF 每日淨流入/流出資料及 BTC ETF 成交量。
 
-資料來源優先順序：
-  1. SoSoValue API（主要，免費）
-     https://sosovalue.com/
-  2. Coinglass Public API（備用，部分需要 API key）
-     https://www.coinglass.com/etf/bitcoin
-  3. 本地 CSV 手動備份
+資料來源：
+  1. Farside Investors CSV（主要，手動下載）
+     - BTC: https://farside.co.uk/bitcoin-etf-flow-all-data/
+     - ETH: https://farside.co.uk/ethereum-etf-flow-all-data/
+     CSV 欄位：Date, IBIT, FBTC, ..., Total（單位 US$m，() 為流出）
+  2. Yahoo Finance（BTC ETF 成交量）
+     - 聚合 IBIT, FBTC, BITB, ARKB, GBTC, BTCO 等主要 ETF 日成交量
+  3. SoSoValue / Coinglass API（備用，可能被擋）
+  4. 本地 CSV 手動備份（最後備援）
 
-ETF 自 2024-01-11 開始交易（IBIT, FBTC, BITB, ARKB, BTCO 等）。
-此前日期的 etf_net_flow 設為缺失值 -99.99。
+ETF 交易起始日：
+  BTC 現貨 ETF: 2024-01-11
+  ETH 現貨 ETF: 2024-07-23
 
-注意：此特徵對所有加密資產相同（BTC 現貨 ETF 的總體資金流），
-      模型可學習「ETF 淨流入強度 × 個別資產動能」的交互效果。
+輸出：
+  build_etf_panel() → (T, 5) 矩陣
+    col 0: btc_etf_inflow_norm  (BTC ETF 淨流入 rolling z-score)
+    col 1: btc_etf_inflow_raw   (BTC ETF 淨流入原始值 US$m)
+    col 2: eth_etf_inflow_norm  (ETH ETF 淨流入 rolling z-score)
+    col 3: eth_etf_inflow_raw   (ETH ETF 淨流入原始值 US$m)
+    col 4: btc_etf_vol          (BTC ETF 聚合成交量 log scale)
 """
+from __future__ import annotations
 
 import os
 import numpy as np
 import pandas as pd
-import requests
-import cloudscraper  # 引入 cloudscraper 繞過 Cloudflare 防護
+import yfinance as yf
+
+try:
+    import cloudscraper
+    scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False})
+except ImportError:
+    import requests
+    scraper = requests.Session()
 
 UNK = -99.99
-ETF_LAUNCH_DATE = pd.Timestamp("2024-01-11")
+BTC_ETF_LAUNCH = pd.Timestamp("2024-01-11")
+ETH_ETF_LAUNCH = pd.Timestamp("2024-07-23")
 
-# ── 建立繞過防爬蟲的 Scraper ──────────────────────────────────────────────────
-# 模擬 Chrome 瀏覽器行為，提高 API 請求成功率
-scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False})
+# BTC 現貨 ETF Yahoo Finance tickers（用於成交量）
+BTC_ETF_TICKERS = ["IBIT", "FBTC", "BITB", "ARKB", "GBTC", "BTCO"]
 
-# ── SoSoValue API ──────────────────────────────────────────────────────────────
+
+# ── Farside CSV 解析 ──────────────────────────────────────────────────────────
+
+def _parse_farside_value(val) -> float:
+    """解析 Farside CSV 數值：(123.4) → -123.4, '-' → NaN, '1,234.5' → 1234.5"""
+    if isinstance(val, (int, float)):
+        return float(val)
+    s = str(val).strip()
+    if s in ('-', '', 'nan', '-\xa0', '\xa0', '-\xa0-'):
+        return np.nan
+    # 移除千分位逗號
+    s = s.replace(',', '')
+    # 處理括號（流出）
+    if s.startswith('(') and s.endswith(')'):
+        try:
+            return -float(s[1:-1])
+        except ValueError:
+            return np.nan
+    try:
+        return float(s)
+    except ValueError:
+        return np.nan
+
+
+def parse_farside_csv(csv_path: str) -> pd.DataFrame:
+    """
+    解析 Farside Investors ETF flow CSV（BTC 或 ETH 格式）。
+    回傳以 date 為 index 的 DataFrame，包含 etf_net_flow 欄（Total, US$m）。
+    """
+    if not os.path.exists(csv_path):
+        print(f"  [WARN] Farside CSV 不存在：{csv_path}")
+        return pd.DataFrame(columns=["etf_net_flow"])
+
+    try:
+        df_raw = pd.read_csv(csv_path, header=0)
+    except Exception as e:
+        print(f"  [ERR] 讀取 Farside CSV 失敗: {e}")
+        return pd.DataFrame(columns=["etf_net_flow"])
+
+    # 找 Total 欄
+    total_col = None
+    for col in df_raw.columns:
+        if 'total' in str(col).lower().strip():
+            total_col = col
+            break
+    if total_col is None:
+        total_col = df_raw.columns[-1]
+        print(f"  [WARN] 未找到 'Total' 欄，使用最後一欄：{total_col}")
+
+    # 第一欄為日期（可能是 unnamed）
+    date_col = df_raw.columns[0]
+
+    # 需要跳過的非資料列
+    skip_labels = {'fee', 'date', 'seed', 'total', 'average', 'maximum', 'minimum', ''}
+
+    records = []
+    for _, row in df_raw.iterrows():
+        date_str = str(row[date_col]).strip()
+        # 跳過非日期列
+        if date_str.lower() in skip_labels or pd.isna(row[date_col]):
+            continue
+        # 嘗試解析日期
+        try:
+            date = pd.to_datetime(date_str, dayfirst=True)
+        except (ValueError, TypeError):
+            continue
+        # 解析 Total 值
+        total_val = _parse_farside_value(row[total_col])
+        records.append({'date': date, 'etf_net_flow': total_val})
+
+    if not records:
+        print(f"  [WARN] Farside CSV 解析結果為空")
+        return pd.DataFrame(columns=["etf_net_flow"])
+
+    result = pd.DataFrame(records)
+    result = result.set_index('date').sort_index()
+    result['etf_net_flow'] = pd.to_numeric(result['etf_net_flow'], errors='coerce')
+    print(f"  [OK] Farside CSV: {len(result)} 筆, {result.index[0].date()} ~ {result.index[-1].date()}")
+    return result
+
+
+def _aggregate_to_weekly(df: pd.DataFrame, col: str = "etf_net_flow") -> pd.DataFrame:
+    """將日頻 ETF 流量聚合至週頻（週合計），並計算 rolling z-score。"""
+    if df.empty or col not in df.columns:
+        return pd.DataFrame(columns=[f"{col}", f"{col}_norm"])
+
+    df_weekly = df[[col]].resample("W").sum()
+
+    # 滾動 z-score（窗口 52 週 = 1 年）
+    roll_mean = df_weekly[col].rolling(52, min_periods=4).mean()
+    roll_std  = df_weekly[col].rolling(52, min_periods=4).std()
+    df_weekly[f"{col}_norm"] = (df_weekly[col] - roll_mean) / (roll_std + 1e-10)
+
+    return df_weekly
+
+
+# ── Yahoo Finance ETF 成交量 ─────────────────────────────────────────────────
+
+def fetch_etf_volume_yahoo(start: str = "2024-01-01") -> pd.DataFrame:
+    """
+    從 Yahoo Finance 下載 BTC 現貨 ETF 成交量（聚合 IBIT+FBTC+...），
+    聚合至週頻，取 log 尺度。
+    """
+    print("  Fetching BTC ETF volume from Yahoo Finance...")
+    try:
+        df = yf.download(
+            BTC_ETF_TICKERS, start=start, interval="1d",
+            progress=False, auto_adjust=True, group_by="ticker"
+        )
+        if df.empty:
+            print("  [WARN] Yahoo Finance ETF volume: 空資料")
+            return pd.DataFrame(columns=["btc_etf_vol"])
+
+        # 提取各 ticker 的 Volume 並加總
+        total_vol = pd.Series(0.0, index=df.index)
+        for ticker in BTC_ETF_TICKERS:
+            try:
+                if isinstance(df.columns, pd.MultiIndex):
+                    vol = df[(ticker, "Volume")]
+                else:
+                    vol = df["Volume"]
+                total_vol = total_vol.add(vol.fillna(0), fill_value=0)
+            except (KeyError, TypeError):
+                continue
+
+        total_vol.index = pd.to_datetime(total_vol.index).tz_localize(None)
+        # 週合計
+        weekly = total_vol.resample("W").sum()
+        # log 尺度
+        result = pd.DataFrame({"btc_etf_vol": np.log1p(weekly)})
+        print(f"  [OK] BTC ETF volume: {len(result)} 週")
+        return result
+
+    except Exception as e:
+        print(f"  [WARN] Yahoo Finance ETF volume 失敗: {e}")
+        return pd.DataFrame(columns=["btc_etf_vol"])
+
+
+# ── SoSoValue / Coinglass API（備用） ────────────────────────────────────────
 
 def _fetch_sosovalue() -> pd.DataFrame:
-    """
-    嘗試從 SoSoValue 取得 BTC 現貨 ETF 每日總淨流入（USD，單位：百萬）。
-    """
+    """嘗試從 SoSoValue 取得 BTC 現貨 ETF 每日總淨流入（備用）。"""
     url = "https://sosovalue.com/api/etf/btc-total-net-flow"
-    # 使用更真實的 Headers
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "en-US,en;q=0.9",
         "Referer": "https://sosovalue.com/"
     }
     try:
-        # 改用 scraper 發送請求
         resp = scraper.get(url, headers=headers, timeout=30)
         resp.raise_for_status()
         payload = resp.json()
-
-        # 兼容 list 或 {data: list} 兩種格式
         rows = payload if isinstance(payload, list) else payload.get("data", [])
         if not rows:
-            print("  [WARN] SoSoValue API 回傳空資料")
             return pd.DataFrame()
-            
         df = pd.DataFrame(rows)
-
-        # 自動偵測日期欄和流量欄
-        date_col = next(
-            (c for c in df.columns if any(k in c.lower() for k in ["date", "time", "day"])),
-            None
-        )
-        flow_col = next(
-            (c for c in df.columns if any(k in c.lower() for k in ["net", "flow", "inflow"])),
-            None
-        )
+        date_col = next((c for c in df.columns if any(k in c.lower() for k in ["date", "time"])), None)
+        flow_col = next((c for c in df.columns if any(k in c.lower() for k in ["net", "flow"])), None)
         if date_col is None or flow_col is None:
-            print(f"  [WARN] SoSoValue 無法識別欄位。現有欄位：{df.columns.tolist()}")
             return pd.DataFrame()
-
         df["date"] = pd.to_datetime(df[date_col])
         df = df.set_index("date").sort_index()
         df["etf_net_flow"] = pd.to_numeric(df[flow_col], errors="coerce")
         print(f"  [OK] SoSoValue: {len(df)} 筆 ETF 流量資料")
         return df[["etf_net_flow"]]
-
     except Exception as e:
         print(f"  [WARN] SoSoValue 失敗: {e}")
         return pd.DataFrame()
 
 
-# ── Coinglass Public API ───────────────────────────────────────────────────────
-
-def _fetch_coinglass(api_key: str = "") -> pd.DataFrame:
-    """
-    從 Coinglass Open API 取得 BTC ETF 資金流。
-    """
-    api_key = api_key or os.environ.get("COINGLASS_API_KEY", "")
-    url = "https://open-api.coinglass.com/public/v2/bitcoin_etf/flow"
-    headers = {
-        "coinglassSecret": api_key,
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "application/json"
-    }
-    try:
-        # 同樣改用 scraper
-        resp = scraper.get(url, headers=headers, timeout=30)
-        resp.raise_for_status()
-        payload = resp.json()
-
-        if str(payload.get("code", "")) != "0":
-            print(f"  [WARN] Coinglass API 錯誤碼：{payload.get('msg', 'unknown')}")
-            return pd.DataFrame()
-
-        rows = payload.get("data", [])
-        if not rows:
-            return pd.DataFrame()
-            
-        df = pd.DataFrame(rows)
-
-        date_col = next(
-            (c for c in df.columns if "date" in c.lower() or "time" in c.lower()),
-            None
-        )
-        if date_col:
-            df["date"] = pd.to_datetime(df[date_col])
-            df = df.set_index("date").sort_index()
-
-        # 加總所有 ETF 的淨流入
-        flow_cols = [c for c in df.columns if "flow" in c.lower() or "Flow" in c]
-        if "totalNetFlow" in df.columns:
-            df["etf_net_flow"] = pd.to_numeric(df["totalNetFlow"], errors="coerce")
-        elif flow_cols:
-            df["etf_net_flow"] = df[flow_cols].apply(
-                pd.to_numeric, errors="coerce"
-            ).sum(axis=1)
-        else:
-            print("  [WARN] Coinglass 無法找到流量欄位")
-            return pd.DataFrame()
-
-        print(f"  [OK] Coinglass: {len(df)} 筆 ETF 流量資料")
-        return df[["etf_net_flow"]]
-
-    except Exception as e:
-        print(f"  [WARN] Coinglass 失敗: {e}")
-        return pd.DataFrame()
-
-
-# ── 手動 CSV 備份讀取 ─────────────────────────────────────────────────────────
-
-def load_from_csv(csv_path: str) -> pd.DataFrame:
-    """
-    從本地 CSV 讀取 ETF 流量資料（作為最後備援）。
-    """
-    if not os.path.exists(csv_path):
-        return pd.DataFrame()
-
-    try:
-        df = pd.read_csv(csv_path, parse_dates=["date"])
-        df = df.set_index("date").sort_index()
-        if "etf_net_flow" not in df.columns:
-            # 嘗試找替代欄
-            flow_col = next(
-                (c for c in df.columns if "net" in c.lower() or "flow" in c.lower()),
-                None
-            )
-            if flow_col:
-                df["etf_net_flow"] = pd.to_numeric(df[flow_col], errors="coerce")
-            else:
-                print("  [ERR] CSV 中找不到流量欄位")
-                return pd.DataFrame()
-        return df[["etf_net_flow"]]
-    except Exception as e:
-        print(f"  [ERR] 讀取 CSV 失敗: {e}")
-        return pd.DataFrame()
-
-
 # ── 主函數 ────────────────────────────────────────────────────────────────────
 
-def fetch_etf_flows(
-    start: str = "2024-01-01",
+def fetch_btc_etf_flows(
+    btc_farside_csv: str | None = None,
     csv_backup: str | None = None,
 ) -> pd.DataFrame:
     """
-    依優先順序嘗試取得 BTC ETF 日頻淨流入資料。
+    取得 BTC ETF 日頻淨流入資料。優先使用 Farside CSV。
     """
     print("  Fetching BTC ETF flows...")
+    df = pd.DataFrame()
 
-    df = _fetch_sosovalue()
+    # 優先：Farside CSV
+    if btc_farside_csv:
+        df = parse_farside_csv(btc_farside_csv)
+
+    # 備用：SoSoValue API
     if df.empty:
-        df = _fetch_coinglass()
-    if df.empty and csv_backup:
-        df = load_from_csv(csv_backup)
-        if not df.empty:
-             print(f"  [OK] 從 CSV 載入: {len(df)} 筆 ETF 流量資料")
-             
+        df = _fetch_sosovalue()
+
+    # 最後備援：csv_backup
+    if df.empty and csv_backup and os.path.exists(csv_backup):
+        try:
+            df = pd.read_csv(csv_backup, parse_dates=["date"]).set_index("date").sort_index()
+            if "etf_net_flow" not in df.columns:
+                flow_col = next((c for c in df.columns if "flow" in c.lower()), None)
+                if flow_col:
+                    df["etf_net_flow"] = pd.to_numeric(df[flow_col], errors="coerce")
+                else:
+                    df = pd.DataFrame()
+            else:
+                print(f"  [OK] 從備援 CSV 載入: {len(df)} 筆")
+        except Exception:
+            df = pd.DataFrame()
+
     if df.empty:
-        print("  [WARN] 所有 ETF 資料來源均失敗。返回空資料框。")
-        print("         請參閱 README：手動下載 CSV 後放置於 datasets/ 目錄。")
-        # 建立一個包含必須欄位的空 DataFrame
-        empty_df = pd.DataFrame(columns=["etf_net_flow", "etf_net_flow_norm"])
-        empty_df.index = pd.DatetimeIndex([]) 
-        empty_df.index.name = "date"
-        return empty_df
+        print("  [WARN] 所有 BTC ETF 資料來源均失敗")
+        return pd.DataFrame(columns=["etf_net_flow", "etf_net_flow_norm"])
 
-    # 篩選 ETF 上市後的資料
-    df = df[df.index >= pd.to_datetime(start)]
+    return _aggregate_to_weekly(df)
 
+
+def fetch_eth_etf_flows(
+    eth_farside_csv: str | None = None,
+) -> pd.DataFrame:
+    """
+    取得 ETH ETF 日頻淨流入資料。來源：Farside CSV。
+    """
+    print("  Fetching ETH ETF flows...")
+    if not eth_farside_csv:
+        print("  [WARN] 未提供 ETH Farside CSV 路徑")
+        return pd.DataFrame(columns=["etf_net_flow", "etf_net_flow_norm"])
+
+    df = parse_farside_csv(eth_farside_csv)
     if df.empty:
         return pd.DataFrame(columns=["etf_net_flow", "etf_net_flow_norm"])
 
-    # 週頻：取週合計（資金流以合計更合理）
-    # 使用 Pandas 2.2+ 相容寫法
-    df_weekly = df.resample("W").sum()
+    return _aggregate_to_weekly(df)
 
-    # 滾動 z-score（窗口 = 52 週，即 1 年）
-    roll_mean = df_weekly["etf_net_flow"].rolling(52, min_periods=4).mean()
-    roll_std  = df_weekly["etf_net_flow"].rolling(52, min_periods=4).std()
-    df_weekly["etf_net_flow_norm"] = (
-        (df_weekly["etf_net_flow"] - roll_mean) / (roll_std + 1e-10)
-    )
 
-    print(f"  [OK] ETF 流量：{len(df_weekly)} 週（{df_weekly.index[0].date()} ~ {df_weekly.index[-1].date()}）")
-    return df_weekly
-
+# ── Panel 建構 ────────────────────────────────────────────────────────────────
 
 def build_etf_panel(
     dates: pd.DatetimeIndex,
+    btc_farside_csv: str | None = None,
+    eth_farside_csv: str | None = None,
     csv_backup: str | None = None,
 ) -> np.ndarray:
     """
-    建立 ETF 流量矩陣，shape = (T, 2)：
+    建立 ETF 特徵矩陣，shape = (T, 5)：
+      col 0: btc_etf_inflow_norm
+      col 1: btc_etf_inflow_raw
+      col 2: eth_etf_inflow_norm
+      col 3: eth_etf_inflow_raw
+      col 4: btc_etf_vol (log scale)
     """
-    df = fetch_etf_flows(csv_backup=csv_backup)
     T = len(dates)
-    panel = np.full((T, 2), UNK, dtype=np.float32)
+    panel = np.full((T, 5), UNK, dtype=np.float32)
 
-    if df.empty:
-        return panel
+    # ── BTC ETF 流量 ──
+    btc_df = fetch_btc_etf_flows(
+        btc_farside_csv=btc_farside_csv,
+        csv_backup=csv_backup,
+    )
+    if not btc_df.empty:
+        for t, date in enumerate(dates):
+            if date < BTC_ETF_LAUNCH:
+                continue
+            if date in btc_df.index:
+                raw = btc_df.loc[date, "etf_net_flow"]
+                norm = btc_df.loc[date, "etf_net_flow_norm"] if "etf_net_flow_norm" in btc_df.columns else UNK
+                panel[t, 0] = float(norm) if not (pd.isna(norm) or np.isinf(norm)) else UNK
+                panel[t, 1] = float(raw)  if not (pd.isna(raw)  or np.isinf(raw))  else UNK
 
-    for t, date in enumerate(dates):
-        if date < ETF_LAUNCH_DATE:
-            continue  # ETF 上市前保持 UNK
-        if date in df.index:
-            raw  = df.loc[date, "etf_net_flow"]
-            
-            # 若 df 只有原始流量（例如只有一週資料導致無法計算 norm），給予預設值
-            norm = df.loc[date, "etf_net_flow_norm"] if "etf_net_flow_norm" in df.columns else UNK
-            
-            panel[t, 0] = float(raw)  if not (pd.isna(raw)  or np.isinf(raw))  else UNK
-            panel[t, 1] = float(norm) if not (pd.isna(norm) or np.isinf(norm)) else UNK
+    # ── ETH ETF 流量 ──
+    eth_df = fetch_eth_etf_flows(eth_farside_csv=eth_farside_csv)
+    if not eth_df.empty:
+        for t, date in enumerate(dates):
+            if date < ETH_ETF_LAUNCH:
+                continue
+            if date in eth_df.index:
+                raw = eth_df.loc[date, "etf_net_flow"]
+                norm = eth_df.loc[date, "etf_net_flow_norm"] if "etf_net_flow_norm" in eth_df.columns else UNK
+                panel[t, 2] = float(norm) if not (pd.isna(norm) or np.isinf(norm)) else UNK
+                panel[t, 3] = float(raw)  if not (pd.isna(raw)  or np.isinf(raw))  else UNK
+
+    # ── BTC ETF 成交量（Yahoo Finance）──
+    etf_vol = fetch_etf_volume_yahoo(start="2024-01-01")
+    if not etf_vol.empty:
+        for t, date in enumerate(dates):
+            if date < BTC_ETF_LAUNCH:
+                continue
+            if date in etf_vol.index:
+                v = etf_vol.loc[date, "btc_etf_vol"]
+                panel[t, 4] = float(v) if not (pd.isna(v) or np.isinf(v)) else UNK
 
     return panel

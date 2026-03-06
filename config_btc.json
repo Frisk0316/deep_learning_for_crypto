@@ -1,0 +1,44 @@
+{
+  "individual_feature_file":       "datasets/btc_panel.npz",
+  "individual_feature_file_valid": "datasets/btc_panel.npz",
+  "individual_feature_file_test":  "datasets/btc_panel.npz",
+
+  "macro_feature_file":            "",
+  "macro_feature_file_valid":      "",
+  "macro_feature_file_test":       "",
+
+  "macro_idx":           [],
+  "macro_feature_dim":   0,
+
+  "individual_feature_dim": 22,
+
+  "num_layers":    1,
+  "hidden_dim":    [64],
+  "dropout":       0.95,
+  "sub_epoch":     false,
+
+  "num_epochs":    300,
+  "loss_factor":   1.0,
+  "weighted_loss": false,
+
+  "optimizer":     "Adam",
+  "learning_rate": 0.001,
+  "reg_l1":        0.0,
+  "reg_l2":        0.001,
+
+  "_comment_features": {
+    "0~4":   "Price Momentum  (r1w, r4w, r12w, r26w, r52w)",
+    "5~9":   "Technical       (rsi_14, bb_pct, vol_ratio, atr_pct, obv_change)",
+    "10~14": "On-chain        (active_addr, tx_count, nvt, exchange_net_flow, mvrv)",
+    "15~18": "Macro/Sentiment (fear_greed, spx_ret, dxy_ret, vix)",
+    "19~21": "ETF+Polymarket  (etf_net_flow_norm, polymarket_btc, etf_net_flow_raw)"
+  },
+
+  "_comment_subset_examples": {
+    "price_only":        "range(0, 5)",
+    "price_technical":   "range(0, 10)",
+    "price_onchain":     "range(0, 15)",
+    "all_no_etf_poly":   "range(0, 19)",
+    "all":               "range(0, 22)"
+  }
+}

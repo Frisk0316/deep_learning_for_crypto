@@ -20,9 +20,6 @@ sampling_folds/
 checkpoints/
 *.log
 
-# Generated plots
-visualizations/
-
 # IDE and tool-specific settings
 .vscode/
 .claude/

@@ -130,6 +130,10 @@ def run_code(train_lists: list):
         config["learning_rate"]          = lr
         config["individual_feature_dim"] = len(subset_list)
 
+        # 動態計算 asset_feature_dim：features 0~15 為個別資產特徵
+        n_asset_feats = sum(1 for f in subset_list if f < 16)
+        config["asset_feature_dim"] = n_asset_feats
+
         deco_print("Config:")
         print(json.dumps(
             {k: v for k, v in config.items() if not k.startswith("_")},
@@ -141,7 +145,7 @@ def run_code(train_lists: list):
         for fold_i, (train_idx, valid_idx, test_idx) in enumerate(folds):
             logdir = os.path.join(
                 FLAGS.logdir, "btc", f"folder_{folder_idx}",
-                f"feat{start_feat}to{end_feat}"
+                f"feat{start_feat}to{end_feat}_n{len(subset_list)}"
                 f"_L{num_layers}_H{hidden_dim[0]}"
                 f"_drop{dropout}_l2{l2_penalty}_lr{lr}"
                 f"_{model_selection}_split{fold_i}"
@@ -182,10 +186,22 @@ def get_tuned_network() -> list:
       [subset, num_layers, hidden_dim, dropout, max_hidden,
        l1_penalty, l2_penalty, lr, model_selection]
 
-    (A) 僅價格動能 + 技術指標（不需外部 API，最快）
-    (B) 加入鏈上指標
-    (C) 全部 33 個特徵
-    (D) 動能 + 總體情緒 + ETF（簡約模型）
+    特徵子集（共 49 個特徵，index 0~48）：
+      A [0~4]   Price Momentum
+      B [5~10]  Technical
+      C [11~15] On-chain
+      D [16~26] Macro/Sentiment
+      E [27~32] ETF + Polymarket
+      F [33~43] DeFi + Derivatives (新增)
+      G [44~48] Reserved (預留, 需 API Key)
+
+    訓練組合：
+      (A) 價格動能 + 技術  [0~10]
+      (B) + 鏈上指標       [0~15]
+      (C) 原版全部          [0~32]  ← 對照組 (baseline)
+      (D) 全部 + DeFi      [0~43]  ← 主實驗
+      (E) 動能 + 宏觀 + DeFi/衍生品（簡約模型）
+      (F) 全部含預留        [0~48]  ← 未來 API Key 到位時使用
     """
     temp_results = [
         # (A) Price Momentum + Technical  [0~10]
@@ -194,12 +210,19 @@ def get_tuned_network() -> list:
         # (B) + On-chain  [0~15]
         [range(0, 16),  1, [64], 0.95, 6, 0.0, 0.001, 0.001, "Factor_sharpe"],
 
-        # (C) All features  [0~32]
+        # (C) Original all features [0~32]  (baseline 對照)
         [range(0, 33),  1, [64], 0.95, 6, 0.0, 0.001, 0.001, "Factor_sharpe"],
 
-        # (D) Momentum + Macro + ETF（parsimonious）
-        [list(range(0, 5)) + list(range(16, 33)),
+        # (D) All + DeFi/Derivatives [0~43]  (主實驗)
+        [range(0, 44),  1, [64], 0.95, 6, 0.0, 0.001, 0.001, "Factor_sharpe"],
+
+        # (E) Momentum + Macro + DeFi/Derivatives（簡約模型）
+        [list(range(0, 5)) + list(range(16, 44)),
          1, [64], 0.95, 6, 0.0, 0.001, 0.001, "Factor_sharpe"],
+
+        # (F) All including reserved [0~48]
+        # 當 API Key 到位時取消註解
+        # [range(0, 49),  1, [64], 0.95, 6, 0.0, 0.001, 0.001, "Factor_sharpe"],
     ]
 
     result = []

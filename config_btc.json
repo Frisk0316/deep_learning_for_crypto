@@ -10,7 +10,11 @@
   "macro_idx":           [],
   "macro_feature_dim":   0,
 
-  "individual_feature_dim": 33,
+  "individual_feature_dim": 49,
+
+  "model_type":      "gated",
+  "asset_feature_dim": 16,
+  "gate_dim":          16,
 
   "num_layers":    1,
   "hidden_dim":    [64],
@@ -31,14 +35,22 @@
     "5~10":  "Technical       (rsi_14, bb_pct, vol_ratio, atr_pct, obv_change, vol_usd)",
     "11~15": "On-chain        (active_addr, tx_count, nvt, exchange_net_flow, mvrv)",
     "16~26": "Macro/Sentiment (fear_greed, spx_ret, dxy_ret, vix, gold_ret, silver_ret, dji_ret, spx_vol_chg, gold_vol_chg, silver_vol_chg, dji_vol_chg)",
-    "27~32": "ETF+Polymarket  (btc_etf_inflow_norm, polymarket_btc, btc_etf_inflow_raw, eth_etf_inflow_norm, eth_etf_inflow_raw, btc_etf_vol)"
+    "27~32": "ETF+Polymarket  (btc_etf_inflow_norm, polymarket_btc, btc_etf_inflow_raw, eth_etf_inflow_norm, eth_etf_inflow_raw, btc_etf_vol)",
+    "33~43": "DeFi+Derivatives (defi_tvl_chg, ethereum_tvl_chg, dex_volume_chg, defi_fees_chg, stablecoin_mcap_chg, aave_tvl_chg, uniswap_tvl_chg, lido_tvl_chg, funding_rate, open_interest_chg, long_short_ratio)",
+    "44~48": "Reserved (protocol_revenue_chg, eth_gas_fee, defi_uaw_chg, reserved_4, reserved_5)"
   },
 
   "_comment_subset_examples": {
     "price_only":        "range(0, 5)",
     "price_technical":   "range(0, 11)",
     "price_onchain":     "range(0, 16)",
-    "all_no_etf_poly":   "range(0, 27)",
-    "all":               "range(0, 33)"
+    "all_no_defi":       "range(0, 33)",
+    "all_with_defi":     "range(0, 44)",
+    "all":               "range(0, 49)"
+  },
+
+  "_comment_model_types": {
+    "ffn":   "原版 FEN FFN（向後相容，無交互機制）",
+    "gated": "Gated Interaction FFN（新版，market state 調控 asset features）"
   }
 }

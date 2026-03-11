@@ -61,6 +61,12 @@ class CryptoChar:
                                    spx_vol_chg, gold_vol_chg, silver_vol_chg, dji_vol_chg
     Category E - ETF + Polymarket: btc_etf_inflow_norm, polymarket_btc, btc_etf_inflow_raw,
                                    eth_etf_inflow_norm, eth_etf_inflow_raw, btc_etf_vol
+    Category F - DeFi + Derivatives: defi_tvl_chg, ethereum_tvl_chg, dex_volume_chg,
+                                   defi_fees_chg, stablecoin_mcap_chg,
+                                   aave_tvl_chg, uniswap_tvl_chg, lido_tvl_chg,
+                                   funding_rate, open_interest_chg, long_short_ratio
+    Category G - Reserved        : protocol_revenue_chg, eth_gas_fee, defi_uaw_chg,
+                                   reserved_4, reserved_5
     """
 
     def __init__(self) -> None:
@@ -70,16 +76,24 @@ class CryptoChar:
             "On-chain",
             "Macro/Sentiment",
             "ETF & Polymarket",
+            "DeFi & Derivatives",
+            "Reserved",
         ]
         self._category2variables = {
-            "Price Momentum":   ["r1w", "r4w", "r12w", "r26w", "r52w"],
-            "Technical":        ["rsi_14", "bb_pct", "vol_ratio", "atr_pct", "obv_change", "vol_usd"],
-            "On-chain":         ["active_addr", "tx_count", "nvt", "exchange_net_flow", "mvrv"],
-            "Macro/Sentiment":  ["fear_greed", "spx_ret", "dxy_ret", "vix",
-                                 "gold_ret", "silver_ret", "dji_ret",
-                                 "spx_vol_chg", "gold_vol_chg", "silver_vol_chg", "dji_vol_chg"],
-            "ETF & Polymarket": ["btc_etf_inflow_norm", "polymarket_btc", "btc_etf_inflow_raw",
-                                 "eth_etf_inflow_norm", "eth_etf_inflow_raw", "btc_etf_vol"],
+            "Price Momentum":      ["r1w", "r4w", "r12w", "r26w", "r52w"],
+            "Technical":           ["rsi_14", "bb_pct", "vol_ratio", "atr_pct", "obv_change", "vol_usd"],
+            "On-chain":            ["active_addr", "tx_count", "nvt", "exchange_net_flow", "mvrv"],
+            "Macro/Sentiment":     ["fear_greed", "spx_ret", "dxy_ret", "vix",
+                                    "gold_ret", "silver_ret", "dji_ret",
+                                    "spx_vol_chg", "gold_vol_chg", "silver_vol_chg", "dji_vol_chg"],
+            "ETF & Polymarket":    ["btc_etf_inflow_norm", "polymarket_btc", "btc_etf_inflow_raw",
+                                    "eth_etf_inflow_norm", "eth_etf_inflow_raw", "btc_etf_vol"],
+            "DeFi & Derivatives":  ["defi_tvl_chg", "ethereum_tvl_chg", "dex_volume_chg",
+                                    "defi_fees_chg", "stablecoin_mcap_chg",
+                                    "aave_tvl_chg", "uniswap_tvl_chg", "lido_tvl_chg",
+                                    "funding_rate", "open_interest_chg", "long_short_ratio"],
+            "Reserved":            ["protocol_revenue_chg", "eth_gas_fee", "defi_uaw_chg",
+                                    "reserved_4", "reserved_5"],
         }
         self._variable2category = {
             var: cat
@@ -87,11 +101,13 @@ class CryptoChar:
             for var in vars_
         }
         self._category2color = {
-            "Price Momentum":   "royalblue",
-            "Technical":        "tomato",
-            "On-chain":         "mediumseagreen",
-            "Macro/Sentiment":  "darkviolet",
-            "ETF & Polymarket": "darkorange",
+            "Price Momentum":      "royalblue",
+            "Technical":           "tomato",
+            "On-chain":            "mediumseagreen",
+            "Macro/Sentiment":     "darkviolet",
+            "ETF & Polymarket":    "darkorange",
+            "DeFi & Derivatives":  "deeppink",
+            "Reserved":            "gray",
         }
         self._color2category = {v: k for k, v in self._category2color.items()}
 

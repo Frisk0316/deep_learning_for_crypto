@@ -57,27 +57,38 @@ from data_sources.fetch_onchain   import build_onchain_panel
 from data_sources.fetch_sentiment import build_sentiment_panel
 from data_sources.fetch_etf_flows import build_etf_panel
 from data_sources.fetch_polymarket import build_polymarket_panel
+from data_sources.fetch_defi      import build_defi_panel, DEFI_ALL_FEATURES, N_DEFI_FEATURES
 
 UNK = -99.99
 
-# 特徵名稱（共 33 個，index 對應 data[:, :, 1:34]）
+# 特徵名稱（共 49 個，index 對應 data[:, :, 1:50]）
+# 原始 33 個 + 新增 16 個 DeFi/衍生品特徵
 VARIABLE_NAMES = [
-    # Category A: Price Momentum (per-asset, cross-sectional rank)
+    # Category A: Price Momentum (per-asset, cross-sectional rank)  [0~4]
     "r1w", "r4w", "r12w", "r26w", "r52w",
-    # Category B: Technical Indicators (per-asset, cross-sectional rank)
+    # Category B: Technical Indicators (per-asset, cross-sectional rank)  [5~10]
     "rsi_14", "bb_pct", "vol_ratio", "atr_pct", "obv_change", "vol_usd",
-    # Category C: On-chain Metrics (per-asset, cross-sectional rank)
+    # Category C: On-chain Metrics (per-asset, cross-sectional rank)  [11~15]
     "active_addr", "tx_count", "nvt", "exchange_net_flow", "mvrv",
-    # Category D: Macro / Sentiment（對所有資產相同，rolling z-score）
+    # Category D: Macro / Sentiment（對所有資產相同，rolling z-score）  [16~26]
     "fear_greed", "spx_ret", "dxy_ret", "vix",
     "gold_ret", "silver_ret", "dji_ret",
     "spx_vol_chg", "gold_vol_chg", "silver_vol_chg", "dji_vol_chg",
-    # Category E: ETF + Polymarket（對所有資產相同，rolling z-score）
+    # Category E: ETF + Polymarket（對所有資產相同，rolling z-score）  [27~32]
     "btc_etf_inflow_norm", "polymarket_btc", "btc_etf_inflow_raw",
     "eth_etf_inflow_norm", "eth_etf_inflow_raw", "btc_etf_vol",
+    # Category F: DeFi + Derivatives（對所有資產相同，rolling z-score）  [33~48]
+    # 免費 (11 個): 33~43
+    "defi_tvl_chg", "ethereum_tvl_chg", "dex_volume_chg",
+    "defi_fees_chg", "stablecoin_mcap_chg",
+    "aave_tvl_chg", "uniswap_tvl_chg", "lido_tvl_chg",
+    "funding_rate", "open_interest_chg", "long_short_ratio",
+    # 預留 (5 個, 需 API Key): 44~48
+    "protocol_revenue_chg", "eth_gas_fee", "defi_uaw_chg",
+    "reserved_4", "reserved_5",
 ]
 
-N_FEATURES = len(VARIABLE_NAMES)  # 33
+N_FEATURES = len(VARIABLE_NAMES)  # 49
 
 
 def _cross_sectional_rank_normalize(
@@ -161,16 +172,20 @@ def build_dataset(
     end:   str | None = None,
     skip_onchain:    bool = False,
     skip_polymarket: bool = False,
+    skip_defi:       bool = False,
     btc_etf_csv:     str | None = None,
     eth_etf_csv:     str | None = None,
     etf_csv:         str | None = None,
+    token_terminal_key: str | None = None,
+    etherscan_key:      str | None = None,
+    dappradar_key:      str | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     整合所有資料來源，回傳 (data, dates, assets, variable_names)。
 
     data shape : (T, N, N_FEATURES + 1)
                  data[:, :, 0] = target return
-                 data[:, :, 1:] = features
+                 data[:, :, 1:] = 49 features
     """
     print("=" * 60)
     print("Step 1: 下載 OHLCV 資料 & 計算價格/技術特徵 (features 0~10)")
@@ -183,7 +198,7 @@ def build_dataset(
     print(f"資產列表：{assets}")
 
     # 最終 data 陣列：[T, N, 1+N_FEATURES]
-    # col 0 = return, col 1~33 = features
+    # col 0 = return, col 1~49 = features
     data = np.full((T, N, 1 + N_FEATURES), UNK, dtype=np.float32)
 
     # price_panel shape: (T, N, 12) = [target_return, 11 features]
@@ -237,9 +252,27 @@ def build_dataset(
     else:
         print("  [SKIP] 跳過 Polymarket 資料")
 
-    # ── Step 6: 標準化 ───────────────────────────────────────────────────────
+    # ── Step 6: DeFi + 衍生品特徵 ──────────────────────────────────────────────
     print("\n" + "=" * 60)
-    print("Step 6: 標準化")
+    print("Step 6: 取得 DeFi + 衍生品特徵 (features 33~48)")
+    print("=" * 60)
+    if not skip_defi:
+        defi_panel = build_defi_panel(
+            dates=dates,
+            start=start,
+            token_terminal_key=token_terminal_key,
+            etherscan_key=etherscan_key,
+            dappradar_key=dappradar_key,
+        )  # (T, 16)
+        # 廣播至所有資產（DeFi 特徵對所有資產相同）
+        for n in range(N):
+            data[:, n, 34:34+N_DEFI_FEATURES] = defi_panel  # features 33~48
+    else:
+        print("  [SKIP] 跳過 DeFi/衍生品資料")
+
+    # ── Step 7: 標準化 ───────────────────────────────────────────────────────
+    print("\n" + "=" * 60)
+    print("Step 7: 標準化")
     print("=" * 60)
 
     # 個別資產特徵（Category A~C, features 0~15）：橫截面排名標準化
@@ -249,10 +282,10 @@ def build_dataset(
     feat_cross = _cross_sectional_rank_normalize(feat_cross, slice(0, n_cross))
     data[:, :, 1:1+n_cross] = feat_cross
 
-    # 總體特徵（Category D~E, features 16~32）：時間序列滾動 z-score
-    n_macro = N_FEATURES - n_cross  # 17 features
-    print(f"  時間序列 z-score 標準化 (features 16~32, {n_macro} 個特徵)...")
-    feat_macro = data[:, 0, 1+n_cross:1+N_FEATURES].copy()  # (T, 17)
+    # 總體特徵（Category D~F, features 16~48）：時間序列滾動 z-score
+    n_macro = N_FEATURES - n_cross  # 33 features (17 original + 16 DeFi)
+    print(f"  時間序列 z-score 標準化 (features 16~48, {n_macro} 個特徵)...")
+    feat_macro = data[:, 0, 1+n_cross:1+N_FEATURES].copy()  # (T, 33)
     feat_macro = _time_series_normalize(feat_macro)
     for n in range(N):
         data[:, n, 1+n_cross:1+N_FEATURES] = feat_macro
@@ -290,19 +323,38 @@ def main():
                         help="跳過 CoinMetrics 鏈上資料（加快速度）")
     parser.add_argument("--skip_polymarket",action="store_true",
                         help="跳過 Polymarket 資料（加快速度）")
+    parser.add_argument("--skip_defi",      action="store_true",
+                        help="跳過 DeFi/衍生品資料（加快速度）")
+    # 預留 API Key 參數
+    parser.add_argument("--token_terminal_key", default=None,
+                        help="Token Terminal API Key (選填)")
+    parser.add_argument("--etherscan_key",      default=None,
+                        help="Etherscan API Key (選填)")
+    parser.add_argument("--dappradar_key",      default=None,
+                        help="DappRadar API Key (選填)")
     args = parser.parse_args()
+
+    # 也嘗試從環境變數讀取 API Keys
+    import os as _os
+    tt_key  = args.token_terminal_key or _os.environ.get("TOKEN_TERMINAL_API_KEY")
+    es_key  = args.etherscan_key      or _os.environ.get("ETHERSCAN_API_KEY")
+    dr_key  = args.dappradar_key      or _os.environ.get("DAPPRADAR_API_KEY")
 
     # 確保輸出目錄存在
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
 
     data, dates, assets, variables = build_dataset(
-        start           = args.start,
-        end             = args.end,
-        skip_onchain    = args.skip_onchain,
-        skip_polymarket = args.skip_polymarket,
-        btc_etf_csv     = args.btc_etf_csv,
-        eth_etf_csv     = args.eth_etf_csv,
-        etf_csv         = args.etf_csv,
+        start              = args.start,
+        end                = args.end,
+        skip_onchain       = args.skip_onchain,
+        skip_polymarket    = args.skip_polymarket,
+        skip_defi          = args.skip_defi,
+        btc_etf_csv        = args.btc_etf_csv,
+        eth_etf_csv        = args.eth_etf_csv,
+        etf_csv            = args.etf_csv,
+        token_terminal_key = tt_key,
+        etherscan_key      = es_key,
+        dappradar_key      = dr_key,
     )
 
     np.savez(

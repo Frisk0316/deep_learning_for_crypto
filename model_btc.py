@@ -1,16 +1,37 @@
 """
 model_btc.py
 ------------
-BTC 版前饋神經網路（FFN），完全基於 TensorFlow 2.x / Keras API。
+BTC 版前饋神經網路（FFN + Gated Interaction），基於 TensorFlow 2.x / Keras API。
 
-取代原始論文的 FeedForwardModelWithNA_Return（TF 1.x Session 模式），
-保留完全相同的輸入格式與訓練邏輯：
+架構演進（相對原始 FEN 論文）：
+  v1  原版 FEN：純 FFN，所有特徵拼接後過 Dense → ReLU → Dense
+  v2  新增 Gated Interaction Layer：
+      - 參考 FEN 論文 Fig. 12-13 中 sentiment × fund characteristics
+        交互作用是最重要預測因子的發現
+      - 將輸入特徵拆分為「個別資產特徵」與「市場狀態特徵」
+      - 市場狀態特徵（macro/DeFi/衍生品）通過 sigmoid gate 調控
+        個別資產特徵的權重，顯式建模 interaction effect
+      - 同時保留原始 concatenation 路徑（殘差連接）
+
+模型結構：
+  Input: x = [z_asset || z_market]
+
+  Gate path:  g = σ(W_g · z_market + b_g)         ∈ (0,1)^K
+              z_gated = g ⊙ (W_a · z_asset + b_a)  ∈ R^K
+
+  Main path:  z_concat = [z_asset || z_market]
+              h = ReLU(W_h · z_concat + b_h)       ∈ R^H
+
+  Combined:   h_combined = [h || z_gated]
+              output = W_o · h_combined + b_o       ∈ R^1
+
+訓練邏輯不變：
   - Panel 資料 (T × N × M)，以布林遮罩過濾缺失值
   - MSE 損失 + L1/L2 正則化 + Dropout
   - 驗證集 Sharpe Ratio 為 checkpoint 選取準則
   - 支援 'Factor_sharpe' / 'natural' 兩種模式
 
-外部依賴：tensorflow >= 2.2, numpy, pandas（均不依賴原始 deep_learning/ 目錄）
+外部依賴：tensorflow >= 2.2, numpy, pandas
 """
 
 import os
@@ -85,19 +106,12 @@ def construct_long_short_portfolio(
     return np.array(portfolio_returns, dtype=np.float64)
 
 
-# ── 主模型（Keras subclass API）───────────────────────────────────────────────
+# ── 原版 FFN 模型（保留向後相容）──────────────────────────────────────────────
 
 class FFNModel(tf.keras.Model):
     """
-    前饋神經網路，架構與論文完全相同：
+    原版前饋神經網路（無交互機制）：
         輸入 → [Dense(ReLU) → Dropout] × num_layers → Dense(線性) → 預測報酬
-
-    Parameters
-    ----------
-    feature_dim  : int    輸入特徵數
-    hidden_dims  : list   每層節點數，例如 [64]
-    dropout_rate : float  Dropout rate（= 1 - keep_prob；原版 keep_prob=0.95 → rate=0.05）
-    l1, l2       : float  正則化係數
     """
 
     def __init__(
@@ -132,14 +146,132 @@ class FFNModel(tf.keras.Model):
         return self.output_layer(h)  # shape: (batch, 1)
 
 
+# ── Gated Interaction FFN 模型（新版）─────────────────────────────────────────
+
+class GatedInteractionFFN(tf.keras.Model):
+    """
+    帶有 Gated Interaction 機制的前饋神經網路。
+
+    參考 FEN 論文 (Kaniel et al., 2023) 的核心發現：
+      - sentiment/macro × fund characteristics 的交互作用
+        是預測 abnormal returns 的最重要因子 (Fig. 12-13, Table 6)
+      - 純 FFN 雖能隱式學到交互效應，但需要更多參數
+      - 顯式的 gating 機制能更高效地學習 state-dependent 特徵重要性
+
+    架構：
+      1) Gate path:  market state → sigmoid → element-wise gate on asset features
+      2) Main path:  全特徵拼接 → Dense(ReLU) → Dropout (原版 FEN)
+      3) Combined:   [main_hidden || gated_features] → Dense(1)
+
+    Parameters
+    ----------
+    asset_dim   : int   個別資產特徵維度 (Category A~C, features 0~15)
+    market_dim  : int   市場狀態特徵維度 (Category D~F, features 16~48)
+    gate_dim    : int   Gate 輸出維度 (預設 = asset_dim)
+    hidden_dims : list  主路徑每層節點數
+    dropout_rate: float
+    l1, l2      : float
+    """
+
+    def __init__(
+        self,
+        asset_dim: int,
+        market_dim: int,
+        gate_dim: int = 0,
+        hidden_dims: list = None,
+        dropout_rate: float = 0.05,
+        l1: float = 0.0,
+        l2: float = 0.001,
+    ):
+        super().__init__()
+        hidden_dims = hidden_dims or [64]
+        if gate_dim == 0:
+            gate_dim = asset_dim
+
+        self.asset_dim  = asset_dim
+        self.market_dim = market_dim
+        self.gate_dim   = gate_dim
+
+        reg = tf.keras.regularizers.L1L2(l1=l1, l2=l2)
+
+        # ── Gate path: market_state → gate vector ──
+        # 市場狀態特徵通過線性 → sigmoid 生成門控向量
+        self.gate_proj = tf.keras.layers.Dense(
+            gate_dim, activation="sigmoid",
+            kernel_regularizer=reg, name="gate_proj"
+        )
+        # 資產特徵投影到 gate 空間
+        self.asset_proj = tf.keras.layers.Dense(
+            gate_dim, activation="relu",
+            kernel_regularizer=reg, name="asset_proj"
+        )
+
+        # ── Main path: 與原版 FEN 完全相同 ──
+        self.main_hidden_layers  = []
+        self.main_dropout_layers = []
+
+        total_dim = asset_dim + market_dim
+        for h_dim in hidden_dims:
+            self.main_hidden_layers.append(
+                tf.keras.layers.Dense(
+                    h_dim, activation="relu", kernel_regularizer=reg
+                )
+            )
+            self.main_dropout_layers.append(
+                tf.keras.layers.Dropout(dropout_rate)
+            )
+
+        # ── Output: 合併 main path + gated features ──
+        combined_dim = hidden_dims[-1] + (gate_dim if market_dim > 0 else 0)
+        self.output_layer = tf.keras.layers.Dense(
+            1, kernel_regularizer=reg, name="output"
+        )
+
+    def call(self, x, training=False):
+        """
+        Parameters
+        ----------
+        x : (batch, asset_dim + market_dim)
+            前 asset_dim 維 = 個別資產特徵
+            後 market_dim 維 = 市場狀態特徵
+
+        Returns
+        -------
+        output : (batch, 1)
+        """
+        # Main path: 與原版 FEN 相同（全特徵拼接 → Dense → ReLU）
+        h = x
+        for dense, drop in zip(self.main_hidden_layers, self.main_dropout_layers):
+            h = dense(h)
+            h = drop(h, training=training)
+
+        # Gate path: 僅在 market_dim > 0 時啟用
+        if self.market_dim > 0:
+            z_asset  = x[:, :self.asset_dim]    # (batch, asset_dim)
+            z_market = x[:, self.asset_dim:]    # (batch, market_dim)
+            gate = self.gate_proj(z_market)     # (batch, gate_dim) ∈ (0,1)
+            z_a  = self.asset_proj(z_asset)     # (batch, gate_dim)
+            z_gated = gate * z_a                # element-wise gating
+            h_combined = tf.concat([h, z_gated], axis=-1)
+        else:
+            # 無市場特徵時退化為純 FFN
+            h_combined = h
+
+        return self.output_layer(h_combined)  # (batch, 1)
+
+
 # ── 訓練器 ────────────────────────────────────────────────────────────────────
 
 class BTCTrainer:
     """
-    BTC 深度學習訓練器（對應原版 FeedForwardModelWithNA_Return）。
+    BTC 深度學習訓練器。
+
+    支援兩種模型：
+      - "ffn":   原版 FEN FFN (向後相容)
+      - "gated": Gated Interaction FFN (新版，預設)
 
     使用 tf.GradientTape 取代 TF1 Session，其餘邏輯與論文保持一致：
-      - 全量批次訓練（每個 epoch 一次前向 + 反向，對應原版 sub_epoch=False）
+      - 全量批次訓練（每個 epoch 一次前向 + 反向）
       - 驗證集 Sharpe Ratio 最高的 epoch 存為最佳 checkpoint
       - 訓練過程記錄至 training_log.csv
 
@@ -151,7 +283,7 @@ class BTCTrainer:
     def __init__(self, config: dict):
         self.config = config
 
-        # keep_prob → dropout rate（原版 config 存的是 keep_prob）
+        # keep_prob → dropout rate
         keep_prob    = config.get("dropout", 0.95)
         dropout_rate = 1.0 - keep_prob
 
@@ -160,13 +292,41 @@ class BTCTrainer:
             + config.get("macro_feature_dim", 0)
         )
 
-        self.model = FFNModel(
-            feature_dim  = feature_dim,
-            hidden_dims  = config["hidden_dim"],
-            dropout_rate = dropout_rate,
-            l1           = config.get("reg_l1", 0.0),
-            l2           = config.get("reg_l2", 0.001),
-        )
+        model_type = config.get("model_type", "gated")
+
+        if model_type == "gated":
+            # Gated Interaction FFN
+            asset_dim  = config.get("asset_feature_dim", 16)   # features 0~15
+            market_dim = feature_dim - asset_dim                # features 16~
+            gate_dim   = config.get("gate_dim", asset_dim)
+
+            self.model = GatedInteractionFFN(
+                asset_dim    = asset_dim,
+                market_dim   = market_dim,
+                gate_dim     = gate_dim,
+                hidden_dims  = config["hidden_dim"],
+                dropout_rate = dropout_rate,
+                l1           = config.get("reg_l1", 0.0),
+                l2           = config.get("reg_l2", 0.001),
+            )
+            deco_print(
+                f"Model: GatedInteractionFFN "
+                f"(asset={asset_dim}, market={market_dim}, "
+                f"gate={gate_dim}, hidden={config['hidden_dim']})"
+            )
+        else:
+            # 原版 FFN (向後相容)
+            self.model = FFNModel(
+                feature_dim  = feature_dim,
+                hidden_dims  = config["hidden_dim"],
+                dropout_rate = dropout_rate,
+                l1           = config.get("reg_l1", 0.0),
+                l2           = config.get("reg_l2", 0.001),
+            )
+            deco_print(
+                f"Model: FFNModel "
+                f"(feature_dim={feature_dim}, hidden={config['hidden_dim']})"
+            )
 
         self.optimizer = tf.keras.optimizers.Adam(
             learning_rate=config.get("learning_rate", 0.001)

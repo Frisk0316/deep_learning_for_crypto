@@ -134,6 +134,18 @@ def run_code(train_lists: list):
         n_asset_feats = sum(1 for f in subset_list if f < 16)
         config["asset_feature_dim"] = n_asset_feats
 
+        # §12.5 改善：根據特徵數與隱藏層大小自動啟用降維和輕量模型
+        n_feats = len(subset_list)
+        if hidden_dim == [32]:
+            # 新版改善配置：啟用 PCA + 輕量模型 + early stopping
+            config["feature_reduce"]          = "pca"
+            config["pca_variance"]            = 0.95
+            config["model_type"]              = "lightweight"
+            config["bottleneck_dim"]          = min(8, n_feats // 2)
+            config["use_batch_norm"]          = True
+            config["adaptive_hidden"]         = True
+            config["early_stopping_patience"] = 50
+
         deco_print("Config:")
         print(json.dumps(
             {k: v for k, v in config.items() if not k.startswith("_")},
@@ -204,11 +216,19 @@ def get_tuned_network() -> list:
       (F) 全部含預留        [0~48]  ← 未來 API Key 到位時使用
     """
     temp_results = [
+        # ═══════════════════════════════════════════════════════════════════
+        # 原版配置（gated model, 向後相容）
+        # ═══════════════════════════════════════════════════════════════════
+
         # (A) Price Momentum + Technical  [0~10]
         [range(0, 11),  1, [64], 0.95, 6, 0.0, 0.001, 0.001, "Factor_sharpe"],
 
         # (B) + On-chain  [0~15]
         [range(0, 16),  1, [64], 0.95, 6, 0.0, 0.001, 0.001, "Factor_sharpe"],
+
+        # (B2) +Macro: Price + Macro/Sentiment [0~4] + [16~26]（§12.4.4 補足）
+        [list(range(0, 5)) + list(range(16, 27)),
+         1, [64], 0.95, 6, 0.0, 0.001, 0.001, "Factor_sharpe"],
 
         # (C) Original all features [0~32]  (baseline 對照)
         [range(0, 33),  1, [64], 0.95, 6, 0.0, 0.001, 0.001, "Factor_sharpe"],
@@ -223,6 +243,19 @@ def get_tuned_network() -> list:
         # (F) All including reserved [0~48]
         # 當 API Key 到位時取消註解
         # [range(0, 49),  1, [64], 0.95, 6, 0.0, 0.001, 0.001, "Factor_sharpe"],
+
+        # ═══════════════════════════════════════════════════════════════════
+        # §12.5 改善配置：輕量模型 + PCA + 更強正則化
+        # ═══════════════════════════════════════════════════════════════════
+
+        # (G) +Onchain with PCA → 解決 §12.1 維度詛咒
+        [range(0, 16),  1, [32], 0.90, 6, 0.0, 0.005, 0.0005, "Factor_sharpe"],
+
+        # (H) All features with PCA → 高維特徵降維後再訓練
+        [range(0, 33),  1, [32], 0.90, 6, 0.0, 0.005, 0.0005, "Factor_sharpe"],
+
+        # (I) All + DeFi with PCA
+        [range(0, 44),  1, [32], 0.90, 6, 0.0, 0.005, 0.0005, "Factor_sharpe"],
     ]
 
     result = []

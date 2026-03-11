@@ -31,21 +31,67 @@ except ImportError:
 COINMETRICS_BASE = "https://community-api.coinmetrics.io/v4"
 
 # CoinMetrics 資產代碼映射
+# 注意：CoinMetrics Community API 並非支援所有代幣，
+# 不支援的資產會在 build_onchain_panel() 中自動跳過並填入 UNK。
 ASSET_MAP = {
-    "BTC":   "btc",
-    "ETH":   "eth",
-    "SOL":   "sol",
-    "BNB":   "bnb",
-    "XRP":   "xrp",
-    "AVAX":  "avax",
-    "DOGE":  "doge",
-    "ADA":   "ada",
-    "MATIC": "matic",
-    "LINK":  "link",
-    "DOT":   "dot",
-    "LTC":   "ltc",
-    "UNI":   "uni",
-    "ATOM":  "atom",
+    # Tier 1
+    "BTC":    "btc",
+    "ETH":    "eth",
+    "XRP":    "xrp",
+    "BNB":    "bnb",
+    "SOL":    "sol",
+    "DOGE":   "doge",
+    "ADA":    "ada",
+    "TRX":    "trx",
+    "AVAX":   "avax",
+    "LINK":   "link",
+    # Tier 2
+    "SHIB":   "shib",
+    "XLM":    "xlm",
+    "DOT":    "dot",
+    "HBAR":   "hbar",
+    "BCH":    "bch",
+    "LTC":    "ltc",
+    "UNI":    "uni",
+    "NEAR":   "near",
+    "ICP":    "icp",
+    "AAVE":   "aave",
+    "ETC":    "etc",
+    "FET":    "fet",
+    "CRO":    "cro",
+    "POL":    "matic",   # CoinMetrics 仍使用 matic
+    "ATOM":   "atom",
+    # Tier 3
+    "VET":    "vet",
+    "FIL":    "fil",
+    "ALGO":   "algo",
+    "GRT":    "grt",
+    "THETA":  "theta",
+    "FTM":    "ftm",
+    "MKR":    "mkr",
+    "LDO":    "ldo",
+    # Tier 4
+    "ENS":    "ens",
+    "AXS":    "axs",
+    "FLOW":   "flow",
+    "NEO":    "neo",
+    "GALA":   "gala",
+    "KAVA":   "kava",
+    "XTZ":    "xtz",
+    "EOS":    "eos",
+    "SAND":   "sand",
+    "MANA":   "mana",
+    "CHZ":    "chz",
+    # Tier 5
+    "SNX":    "snx",
+    "CRV":    "crv",
+    "COMP":   "comp",
+    "ZEC":    "zec",
+    "IOTA":   "iota",
+    "ZIL":    "zil",
+    "CELO":   "celo",
+    "ANKR":   "ankr",
+    "SKL":    "skl",
 }
 
 # 嘗試抓取的鏈上指標（community tier 可能不支援全部）

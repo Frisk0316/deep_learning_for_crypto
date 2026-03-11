@@ -38,6 +38,8 @@ import os
 import time
 import numpy as np
 import tensorflow as tf
+from sklearn.decomposition import PCA
+from sklearn.linear_model import LassoCV
 
 
 # ── 工具函數（獨立版，不依賴原始 src/utils.py）────────────────────────────────
@@ -260,6 +262,163 @@ class GatedInteractionFFN(tf.keras.Model):
         return self.output_layer(h_combined)  # (batch, 1)
 
 
+# ── 特徵降維前處理（§12.5.2 Feature selection pre-processing）─────────────────
+
+class FeatureReducer:
+    """
+    針對小橫截面（N ≤ 50）的特徵降維器。
+
+    解決 §12.1 維度詛咒問題：14 個資產 × 49 個特徵 → 過擬合。
+    支援三種模式：
+      - "pca":   PCA 保留指定比例的變異
+      - "lasso": LASSO 回歸篩選非零係數特徵
+      - "none":  不做降維（向後相容）
+
+    在訓練集上 fit，驗證/測試集上 transform。
+    """
+
+    def __init__(self, method: str = "none", n_components: float = 0.95,
+                 lasso_alpha: str = "cv"):
+        """
+        Parameters
+        ----------
+        method       : "pca" | "lasso" | "none"
+        n_components : PCA 模式下保留的累積變異比例（0~1）或固定維度（int）
+        lasso_alpha  : "cv" 表示用交叉驗證選 alpha
+        """
+        self.method = method
+        self.n_components = n_components
+        self._reducer = None
+        self._selected_mask = None  # LASSO 用
+        self._fitted = False
+
+    def fit(self, X: np.ndarray, y: np.ndarray = None):
+        """在訓練資料上擬合降維器。"""
+        if self.method == "pca":
+            self._reducer = PCA(n_components=self.n_components)
+            self._reducer.fit(X)
+            deco_print(
+                f"PCA: {X.shape[1]} → {self._reducer.n_components_} dims "
+                f"(explained variance: {self._reducer.explained_variance_ratio_.sum():.2%})"
+            )
+        elif self.method == "lasso":
+            if y is None:
+                raise ValueError("LASSO 降維需要 target y")
+            lasso = LassoCV(cv=5, max_iter=5000, n_jobs=-1)
+            lasso.fit(X, y)
+            self._selected_mask = np.abs(lasso.coef_) > 1e-8
+            n_selected = self._selected_mask.sum()
+            if n_selected == 0:
+                # 退回全部特徵
+                self._selected_mask = np.ones(X.shape[1], dtype=bool)
+                n_selected = X.shape[1]
+            deco_print(
+                f"LASSO: {X.shape[1]} → {n_selected} features "
+                f"(alpha={lasso.alpha_:.6f})"
+            )
+        self._fitted = True
+        return self
+
+    def transform(self, X: np.ndarray) -> np.ndarray:
+        """轉換特徵矩陣。"""
+        if self.method == "pca" and self._reducer is not None:
+            return self._reducer.transform(X).astype(np.float32)
+        elif self.method == "lasso" and self._selected_mask is not None:
+            return X[:, self._selected_mask].astype(np.float32)
+        return X.astype(np.float32)
+
+    def fit_transform(self, X: np.ndarray, y: np.ndarray = None) -> np.ndarray:
+        self.fit(X, y)
+        return self.transform(X)
+
+    @property
+    def output_dim(self) -> int:
+        """降維後的特徵維度。"""
+        if self.method == "pca" and self._reducer is not None:
+            return self._reducer.n_components_
+        elif self.method == "lasso" and self._selected_mask is not None:
+            return int(self._selected_mask.sum())
+        return -1  # 未知，需要在 fit 後才能確定
+
+
+# ── 輕量門控 FFN（§12.5.5 Lightweight gated architecture）────────────────────
+
+class LightweightGatedFFN(tf.keras.Model):
+    """
+    針對小橫截面設計的輕量門控 FFN。
+
+    與 GatedInteractionFFN 的差異：
+      1) 參數量大幅減少：使用線性瓶頸層（bottleneck）壓縮特徵
+      2) BatchNorm 穩定小樣本訓練
+      3) 殘差連接防止梯度消失
+      4) Gate 使用 softmax（而非 sigmoid）實現稀疏注意力
+
+    架構：
+      Input → BatchNorm → Bottleneck(Linear) → [Gate + Main] → Output
+
+    適用場景：N < 50, features > 15
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        bottleneck_dim: int = 8,
+        hidden_dim: int = 32,
+        dropout_rate: float = 0.10,
+        l2: float = 0.005,
+        use_batch_norm: bool = True,
+    ):
+        super().__init__()
+        reg = tf.keras.regularizers.L2(l2)
+
+        self.use_batch_norm = use_batch_norm
+        if use_batch_norm:
+            self.input_bn = tf.keras.layers.BatchNormalization(name="input_bn")
+
+        # 瓶頸層：壓縮高維特徵
+        self.bottleneck = tf.keras.layers.Dense(
+            bottleneck_dim, activation="relu",
+            kernel_regularizer=reg, name="bottleneck"
+        )
+
+        # 稀疏注意力門控：softmax 讓 gate weights 加總為 1
+        self.gate = tf.keras.layers.Dense(
+            bottleneck_dim, activation="softmax",
+            kernel_regularizer=reg, name="sparse_gate"
+        )
+
+        # 主路徑
+        self.hidden = tf.keras.layers.Dense(
+            hidden_dim, activation="relu",
+            kernel_regularizer=reg, name="hidden"
+        )
+        self.dropout = tf.keras.layers.Dropout(dropout_rate)
+
+        # 輸出
+        self.output_layer = tf.keras.layers.Dense(
+            1, kernel_regularizer=reg, name="output"
+        )
+
+    def call(self, x, training=False):
+        # 輸入正規化
+        h = self.input_bn(x, training=training) if self.use_batch_norm else x
+
+        # 瓶頸壓縮
+        z = self.bottleneck(h)          # (batch, bottleneck_dim)
+
+        # 稀疏門控
+        g = self.gate(h)                # (batch, bottleneck_dim), sums to 1
+        z_gated = z * g                 # 稀疏加權
+
+        # 主路徑 + 殘差
+        h_main = self.hidden(h)         # (batch, hidden_dim)
+        h_main = self.dropout(h_main, training=training)
+
+        # 合併
+        h_combined = tf.concat([h_main, z_gated], axis=-1)
+        return self.output_layer(h_combined)
+
+
 # ── 訓練器 ────────────────────────────────────────────────────────────────────
 
 class BTCTrainer:
@@ -292,9 +451,45 @@ class BTCTrainer:
             + config.get("macro_feature_dim", 0)
         )
 
+        # ── 特徵降維器（§12.5.2）──────────────────────────────────────────
+        reduce_method = config.get("feature_reduce", "none")
+        pca_variance  = config.get("pca_variance", 0.95)
+        self.feature_reducer = FeatureReducer(
+            method=reduce_method,
+            n_components=pca_variance,
+        )
+        self._reducer_fitted = False
+
+        # ── 自適應隱藏層維度（§12.1 維度詛咒對策）──────────────────────────
+        hidden_dims = config["hidden_dim"]
+        if config.get("adaptive_hidden", False):
+            # 特徵數少時自動縮小隱藏層，避免過擬合
+            scale = max(0.25, min(1.0, feature_dim / 32))
+            hidden_dims = [max(8, int(h * scale)) for h in hidden_dims]
+            deco_print(f"Adaptive hidden: {config['hidden_dim']} → {hidden_dims}")
+
+        # ── Early stopping 參數（§12.4 過擬合防範）─────────────────────────
+        self.early_stopping_patience = config.get("early_stopping_patience", 0)
+
         model_type = config.get("model_type", "gated")
 
-        if model_type == "gated":
+        if model_type == "lightweight":
+            # 輕量門控 FFN（§12.5.5）
+            bottleneck = config.get("bottleneck_dim", 8)
+            self.model = LightweightGatedFFN(
+                input_dim      = feature_dim,
+                bottleneck_dim = bottleneck,
+                hidden_dim     = hidden_dims[0],
+                dropout_rate   = dropout_rate,
+                l2             = config.get("reg_l2", 0.005),
+                use_batch_norm = config.get("use_batch_norm", True),
+            )
+            deco_print(
+                f"Model: LightweightGatedFFN "
+                f"(input={feature_dim}, bottleneck={bottleneck}, "
+                f"hidden={hidden_dims[0]})"
+            )
+        elif model_type == "gated":
             # Gated Interaction FFN
             asset_dim  = config.get("asset_feature_dim", 16)   # features 0~15
             market_dim = feature_dim - asset_dim                # features 16~
@@ -304,7 +499,7 @@ class BTCTrainer:
                 asset_dim    = asset_dim,
                 market_dim   = market_dim,
                 gate_dim     = gate_dim,
-                hidden_dims  = config["hidden_dim"],
+                hidden_dims  = hidden_dims,
                 dropout_rate = dropout_rate,
                 l1           = config.get("reg_l1", 0.0),
                 l2           = config.get("reg_l2", 0.001),
@@ -312,20 +507,20 @@ class BTCTrainer:
             deco_print(
                 f"Model: GatedInteractionFFN "
                 f"(asset={asset_dim}, market={market_dim}, "
-                f"gate={gate_dim}, hidden={config['hidden_dim']})"
+                f"gate={gate_dim}, hidden={hidden_dims})"
             )
         else:
             # 原版 FFN (向後相容)
             self.model = FFNModel(
                 feature_dim  = feature_dim,
-                hidden_dims  = config["hidden_dim"],
+                hidden_dims  = hidden_dims,
                 dropout_rate = dropout_rate,
                 l1           = config.get("reg_l1", 0.0),
                 l2           = config.get("reg_l2", 0.001),
             )
             deco_print(
                 f"Model: FFNModel "
-                f"(feature_dim={feature_dim}, hidden={config['hidden_dim']})"
+                f"(feature_dim={feature_dim}, hidden={hidden_dims})"
             )
 
         self.optimizer = tf.keras.optimizers.Adam(
@@ -395,6 +590,15 @@ class BTCTrainer:
 
         X_valid = I_cat[mask]   # (n_valid, feature_dim)
         R_valid = R[mask]       # (n_valid,)
+
+        # 特徵降維（§12.5.2）
+        if self.feature_reducer.method != "none":
+            if not self._reducer_fitted:
+                X_valid = self.feature_reducer.fit_transform(X_valid, R_valid)
+                self._reducer_fitted = True
+            else:
+                X_valid = self.feature_reducer.transform(X_valid)
+
         return X_valid.astype(np.float32), R_valid.astype(np.float32)
 
     # ── 訓練步驟（tf.function 加速）──────────────────────────────────────────
@@ -478,6 +682,8 @@ class BTCTrainer:
         self._setup_checkpoint(logdir)
         self._best_sharpe = -float("inf")
         num_epochs = self.config.get("num_epochs", 300)
+        patience = self.early_stopping_patience
+        no_improve_count = 0
 
         # 訓練 log（CSV）
         log_path = os.path.join(logdir, "training_log.csv")
@@ -529,6 +735,17 @@ class BTCTrainer:
                 if valid_sharpe > self._best_sharpe:
                     self._best_sharpe = valid_sharpe
                     self.save_best()
+                    no_improve_count = 0
+                else:
+                    no_improve_count += 1
+
+            # ── Early stopping（§12.4 防止過擬合）─────────────────────────
+            if patience > 0 and no_improve_count >= patience:
+                deco_print(
+                    f"Early stopping at epoch {epoch} "
+                    f"(no improvement for {patience} epochs)"
+                )
+                break
 
             # ── 寫入 log ──────────────────────────────────────────────────────
             with open(log_path, "a") as f:

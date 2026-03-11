@@ -30,6 +30,13 @@
   "reg_l1":        0.0,
   "reg_l2":        0.001,
 
+  "feature_reduce":          "none",
+  "pca_variance":            0.95,
+  "adaptive_hidden":         false,
+  "early_stopping_patience": 0,
+  "bottleneck_dim":          8,
+  "use_batch_norm":          true,
+
   "_comment_features": {
     "0~4":   "Price Momentum  (r1w, r4w, r12w, r26w, r52w)",
     "5~10":  "Technical       (rsi_14, bb_pct, vol_ratio, atr_pct, obv_change, vol_usd)",
@@ -50,7 +57,14 @@
   },
 
   "_comment_model_types": {
-    "ffn":   "原版 FEN FFN（向後相容，無交互機制）",
-    "gated": "Gated Interaction FFN（新版，market state 調控 asset features）"
+    "ffn":         "原版 FEN FFN（向後相容，無交互機制）",
+    "gated":       "Gated Interaction FFN（market state 調控 asset features）",
+    "lightweight": "輕量門控 FFN（§12.5.5，bottleneck + sparse gate + BatchNorm，適合小 N）"
+  },
+
+  "_comment_feature_reduce": {
+    "none":  "不做降維（預設，向後相容）",
+    "pca":   "PCA 降維，保留 pca_variance 比例的累積變異（§12.5.2）",
+    "lasso": "LASSO 回歸篩選非零係數特徵（§12.5.2）"
   }
 }

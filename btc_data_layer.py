@@ -8,7 +8,7 @@ deep_learning/src/ 目錄，不依賴任何 TF1 模組。
 
 主要差異：
   - FirmChar → CryptoChar（5 大特徵類別，33 個特徵）
-  - wficn    → 加密資產代碼（BTC, ETH, SOL, ...）
+  - wficn    → 加密資產代碼（BTC, ETH, SOL, ... 共 86 個）
   - 缺失值標記為 UNK = -99.99（與原版一致）
   - 型別注解相容 Python 3.8+
 """

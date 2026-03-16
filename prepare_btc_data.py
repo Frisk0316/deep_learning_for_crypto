@@ -58,6 +58,7 @@ from data_sources.fetch_sentiment import build_sentiment_panel
 from data_sources.fetch_etf_flows import build_etf_panel
 from data_sources.fetch_polymarket import build_polymarket_panel
 from data_sources.fetch_defi      import build_defi_panel, DEFI_ALL_FEATURES, N_DEFI_FEATURES
+from data_sources.fetch_trump     import build_trump_panel, TRUMP_FEATURE_NAMES, N_TRUMP_FEATURES
 
 UNK = -99.99
 
@@ -83,9 +84,9 @@ VARIABLE_NAMES = [
     "defi_fees_chg", "stablecoin_mcap_chg",
     "aave_tvl_chg", "uniswap_tvl_chg", "lido_tvl_chg",
     "funding_rate", "open_interest_chg", "long_short_ratio",
-    # 預留 (5 個, 需 API Key): 44~48
-    "protocol_revenue_chg", "eth_gas_fee", "defi_uaw_chg",
-    "reserved_4", "reserved_5",
+    # Category G: Trump Social Media Signals（對所有資產相同，rolling z-score）[44~48]
+    "trump_post_count", "trump_caps_ratio", "trump_tariff_score",
+    "trump_crypto_score", "trump_sentiment",
 ]
 
 N_FEATURES = len(VARIABLE_NAMES)  # 49
@@ -173,9 +174,11 @@ def build_dataset(
     skip_onchain:    bool = False,
     skip_polymarket: bool = False,
     skip_defi:       bool = False,
+    skip_trump:      bool = False,
     btc_etf_csv:     str | None = None,
     eth_etf_csv:     str | None = None,
     etf_csv:         str | None = None,
+    trump_code_path: str = "../trump-code",
     token_terminal_key: str | None = None,
     etherscan_key:      str | None = None,
     dappradar_key:      str | None = None,
@@ -270,7 +273,22 @@ def build_dataset(
     else:
         print("  [SKIP] 跳過 DeFi/衍生品資料")
 
-    # ── Step 7: 標準化 ───────────────────────────────────────────────────────
+    # ── Step 7: Trump Social Media Signals ─────────────────────────────────────
+    print("\n" + "=" * 60)
+    print("Step 7: 取得 Trump 社群媒體特徵 (features 44~48)")
+    print("=" * 60)
+    if not skip_trump:
+        trump_panel = build_trump_panel(
+            dates=dates,
+            start=start,
+            trump_code_path=trump_code_path,
+        )  # (T, 5)
+        for n in range(N):
+            data[:, n, 45:50] = trump_panel  # features 44~48
+    else:
+        print("  [SKIP] 跳過 Trump 社群媒體資料")
+
+    # ── Step 8: 標準化 ───────────────────────────────────────────────────────
     print("\n" + "=" * 60)
     print("Step 7: 標準化")
     print("=" * 60)
@@ -325,6 +343,10 @@ def main():
                         help="跳過 Polymarket 資料（加快速度）")
     parser.add_argument("--skip_defi",      action="store_true",
                         help="跳過 DeFi/衍生品資料（加快速度）")
+    parser.add_argument("--skip_trump",     action="store_true",
+                        help="跳過 Trump 社群媒體資料（加快速度）")
+    parser.add_argument("--trump_code_path", default="../trump-code",
+                        help="trump-code 專案路徑（預設 ../trump-code）")
     # 預留 API Key 參數
     parser.add_argument("--token_terminal_key", default=None,
                         help="Token Terminal API Key (選填)")
@@ -349,9 +371,11 @@ def main():
         skip_onchain       = args.skip_onchain,
         skip_polymarket    = args.skip_polymarket,
         skip_defi          = args.skip_defi,
+        skip_trump         = args.skip_trump,
         btc_etf_csv        = args.btc_etf_csv,
         eth_etf_csv        = args.eth_etf_csv,
         etf_csv            = args.etf_csv,
+        trump_code_path    = args.trump_code_path,
         token_terminal_key = tt_key,
         etherscan_key      = es_key,
         dappradar_key      = dr_key,

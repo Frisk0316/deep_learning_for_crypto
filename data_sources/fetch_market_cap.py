@@ -85,16 +85,22 @@ COINGECKO_IDS = {
 UNK = -99.99
 
 
-def _fetch_one(coin_id: str, days: int = 2200) -> pd.DataFrame | None:
-    """Fetch historical market cap for one coin from CoinGecko."""
-    url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
-    params = {"vs_currency": "usd", "days": str(days), "interval": "daily"}
+def _fetch_one(coin_id: str, days: int = 365,
+               base_retry_wait: int = 60) -> pd.DataFrame | None:
+    """Fetch historical market cap for one coin from CoinGecko.
 
-    for attempt in range(3):
+    CoinGecko free tier: days ≤ 365. This covers the test period
+    (~49 weeks / ~11.5 months), which is sufficient for VW portfolio
+    construction. For longer history a paid API key is required.
+    """
+    url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
+    params = {"vs_currency": "usd", "days": str(days)}
+
+    for attempt in range(5):
         try:
             resp = requests.get(url, params=params, timeout=30)
             if resp.status_code == 429:
-                wait = 30 * (attempt + 1)
+                wait = base_retry_wait * (attempt + 1)
                 print(f"    Rate limited, waiting {wait}s...")
                 _time.sleep(wait)
                 continue
@@ -102,6 +108,10 @@ def _fetch_one(coin_id: str, days: int = 2200) -> pd.DataFrame | None:
                 print(f"    HTTP {resp.status_code} for {coin_id}")
                 return None
             data = resp.json()
+            if "status" in data and "error_code" in data["status"]:
+                # CoinGecko error response
+                print(f"    API error for {coin_id}: {data['status']}")
+                return None
             mc = data.get("market_caps", [])
             if not mc:
                 return None
@@ -112,8 +122,8 @@ def _fetch_one(coin_id: str, days: int = 2200) -> pd.DataFrame | None:
             return df
         except Exception as e:
             print(f"    Error fetching {coin_id}: {e}")
-            if attempt < 2:
-                _time.sleep(5)
+            if attempt < 4:
+                _time.sleep(10)
     return None
 
 
@@ -138,13 +148,8 @@ def build_market_cap_panel(
     N = len(assets)
     panel = np.full((T, N), UNK, dtype=np.float64)
 
-    # Convert dates
-    week_dates = []
-    for d in dates:
-        if isinstance(d, str):
-            week_dates.append(pd.Timestamp(d))
-        else:
-            week_dates.append(pd.Timestamp(d))
+    # Convert dates (handles numpy.str_ as well as regular str)
+    week_dates = [pd.Timestamp(str(d)) for d in dates]
 
     print(f"  Fetching market cap for {N} assets from CoinGecko...")
     fetched = 0
@@ -173,9 +178,9 @@ def build_market_cap_panel(
         print(f"    [OK] {asset_str} ({coin_id}): {valid}/{T} weeks")
         fetched += 1
 
-        # Rate limiting: ~6 requests per minute for free tier
-        if fetched % 5 == 0:
-            _time.sleep(12)
+        # Rate limiting: CoinGecko free tier allows ~5-10 req/min.
+        # Sleep 15s between every request to stay well within limits.
+        _time.sleep(15)
 
     valid_pct = (panel != UNK).mean() * 100
     print(f"  Market cap coverage: {valid_pct:.1f}%")
